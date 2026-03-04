@@ -6,6 +6,21 @@ import rehypeKatex from 'rehype-katex'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
 import { nightOwl } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
+// nightOwl inyecta borderBottom como inline style en cada span — lo eliminamos aquí
+// para que ninguna línea de separación aparezca entre tokens
+const cleanNightOwl = Object.fromEntries(
+  Object.entries(nightOwl).map(([sel, styles]) => [
+    sel,
+    Object.fromEntries(
+      Object.entries(styles as Record<string, string>).filter(
+        ([p]) => !p.toLowerCase().includes('border') &&
+                 !p.toLowerCase().includes('textdecoration') &&
+                 !p.toLowerCase().includes('outline')
+      )
+    )
+  ])
+)
+
 const IconCopy = () => (
   <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
     <path d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z"/>
@@ -66,7 +81,7 @@ function CodeRenderer({ inline, className, children }: {
       </div>
       <SyntaxHighlighter
         language={lang}
-        style={nightOwl}
+        style={cleanNightOwl}
         customStyle={{
           margin: 0,
           borderRadius: 0,
