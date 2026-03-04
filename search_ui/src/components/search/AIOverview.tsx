@@ -48,8 +48,23 @@ function CodeRenderer({ inline, className, children }: {
     })
   }, [code])
 
-  if (inline) {
-    return <code className={className}>{children}</code>
+  // Inline explícito, o bloque de una sola línea corta → píldora inline
+  const isShortBlock = !inline && !code.includes('\n') && code.length < 80
+  if (inline || isShortBlock) {
+    return (
+      <code
+        style={{
+          background: 'rgba(99,140,255,0.10)',
+          border: '1px solid rgba(99,140,255,0.18)',
+          color: '#3b5fc0',
+          borderRadius: '0.3em',
+          padding: '0.1em 0.42em',
+          fontSize: '0.85em',
+          fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+          whiteSpace: 'nowrap',
+        }}
+      >{code}</code>
+    )
   }
 
   const bgBody   = 'rgba(11, 16, 40, 0.93)'
