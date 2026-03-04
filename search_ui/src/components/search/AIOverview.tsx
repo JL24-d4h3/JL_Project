@@ -4,7 +4,7 @@ import remarkMath from 'remark-math'
 import remarkGfm from 'remark-gfm'
 import rehypeKatex from 'rehype-katex'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { oneDark } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { nightOwl } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
 const IconCopy = () => (
   <svg className="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
@@ -39,15 +39,26 @@ function CodeRenderer({ inline, className, children }: {
     return <code className={className}>{children}</code>
   }
 
+  const bgBody   = 'rgba(11, 16, 40, 0.93)'
+  const bgHeader  = 'rgba(7, 10, 26, 0.98)'
+  const borderClr = 'rgba(70, 110, 210, 0.22)'
+
   return (
-    <div className="relative my-3">
-      <div className="flex items-center justify-between rounded-t-lg bg-[#282c34] px-4 py-1.5 border-b border-white/10">
-        <span className="text-[11px] font-mono text-slate-400">{lang}</span>
+    <div className="code-block-wrap relative my-4" style={{
+      borderRadius: '0.75rem',
+      border: `1px solid ${borderClr}`,
+      boxShadow: '0 4px 24px rgba(30, 60, 160, 0.13), inset 0 1px 0 rgba(120,160,255,0.07)',
+      overflow: 'hidden',
+    }}>
+      <div className="flex items-center justify-between px-4 py-1.5" style={{
+        background: bgHeader,
+        borderBottom: `1px solid ${borderClr}`,
+      }}>
+        <span className="text-[11px] font-mono" style={{ color: 'rgba(140,170,255,0.75)' }}>{lang}</span>
         <button
           onClick={handleCopy}
-          className={`flex items-center rounded p-1 transition-colors ${
-            copied ? 'text-green-400 bg-white/10' : 'text-slate-400 hover:text-white hover:bg-white/10'
-          }`}
+          className="flex items-center rounded p-1 transition-colors"
+          style={{ color: copied ? '#4ade80' : 'rgba(140,170,255,0.50)' }}
           title={copied ? 'Copiado' : 'Copiar'}
         >
           {copied ? <IconCheck /> : <IconCopy />}
@@ -55,9 +66,16 @@ function CodeRenderer({ inline, className, children }: {
       </div>
       <SyntaxHighlighter
         language={lang}
-        style={oneDark}
-        customStyle={{ margin: 0, borderRadius: '0 0 0.5rem 0.5rem', fontSize: '0.78rem' }}
-        showLineNumbers={code.split('\n').length > 5}
+        style={nightOwl}
+        customStyle={{
+          margin: 0,
+          borderRadius: 0,
+          fontSize: '0.78rem',
+          lineHeight: '1.65',
+          background: bgBody,
+          padding: '1rem 1.1rem',
+        }}
+        showLineNumbers={false}
         wrapLongLines={false}
       >
         {code}
