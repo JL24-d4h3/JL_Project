@@ -42,10 +42,15 @@
 .md-content .katex { font-size: 1.05em; }
 
 /* ── Syntax highlighter — strip all token borders/decorations ───────────── */
-.code-block-wrap pre { margin: 0 !important; }
-.code-block-wrap pre span {
+.code-block-wrap pre { margin: 0 !important; border: none !important; }
+.code-block-wrap pre,
+.code-block-wrap code,
+.code-block-wrap pre span,
+.code-block-wrap pre code {
   border: none !important;
   border-left: none !important;
+  border-right: none !important;
+  border-top: none !important;
   border-bottom: none !important;
   text-decoration: none !important;
   outline: none !important;

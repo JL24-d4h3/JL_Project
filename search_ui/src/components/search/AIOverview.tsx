@@ -4,18 +4,16 @@ import remarkMath from 'remark-math'
 import remarkGfm from 'remark-gfm'
 import rehypeKatex from 'rehype-katex'
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter'
-import { nightOwl } from 'react-syntax-highlighter/dist/esm/styles/prism'
+import { dracula } from 'react-syntax-highlighter/dist/esm/styles/prism'
 
-// nightOwl inyecta borderBottom como inline style en cada span — lo eliminamos aquí
-// para que ninguna línea de separación aparezca entre tokens
-const cleanNightOwl = Object.fromEntries(
-  Object.entries(nightOwl).map(([sel, styles]) => [
+// Eliminar cualquier border/decoration residual del tema
+const cleanDracula = Object.fromEntries(
+  Object.entries(dracula).map(([sel, styles]) => [
     sel,
     Object.fromEntries(
       Object.entries(styles as Record<string, string>).filter(
-        ([p]) => !p.toLowerCase().includes('border') &&
-                 !p.toLowerCase().includes('textdecoration') &&
-                 !p.toLowerCase().includes('outline')
+        ([p]) => !p.toLowerCase().startsWith('border') &&
+                 p !== 'textDecoration' && p !== 'outline'
       )
     )
   ])
@@ -81,7 +79,7 @@ function CodeRenderer({ inline, className, children }: {
       </div>
       <SyntaxHighlighter
         language={lang}
-        style={cleanNightOwl}
+        style={cleanDracula}
         customStyle={{
           margin: 0,
           borderRadius: 0,
