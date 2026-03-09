@@ -19,7 +19,9 @@ export enum ContentType {
 }
 
 export enum ContentStatus {
+  PENDING = 'pending',
   ACTIVE = 'active',
+  REJECTED = 'rejected',
   ARCHIVED = 'archived',
   PROCESSING = 'processing',
   FAILED = 'failed'
@@ -107,6 +109,7 @@ export interface Content {
   
   // Estado
   status: ContentStatus;
+  rejected_reason: string | null;
   priority: number;
   is_featured: boolean;
   

@@ -145,7 +145,7 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
         bitrate,
         thumbnailPath,
         JSON.stringify(metadata),
-        'active', // Directamente activo (o 'processing' si usas queue)
+        'pending', // Awaiting admin review before going active
         is_featured === 'true' || is_featured === true,
         userId,
       ]
@@ -303,4 +303,130 @@ export const deleteContent = asyncHandler(async (req: Request, res: Response) =>
     success: true,
     message: 'Content deleted successfully',
   });
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /api/upload/mine
+// Returns uploads submitted by the current authenticated user
+// ─────────────────────────────────────────────────────────
+export const getMyUploads = asyncHandler(async (req: Request, res: Response) => {
+  const userId = req.user!.id;
+
+  const result = await query(
+    `SELECT id, title, description, content_type, status, rejected_reason,
+            duration, file_size_bytes, thumbnail_path, created_at, updated_at
+     FROM content
+     WHERE created_by = $1 AND deleted_at IS NULL
+     ORDER BY created_at DESC`,
+    [userId]
+  );
+
+  res.json({ success: true, data: result.rows });
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /api/upload/pending
+// Returns all content with status 'pending' (admin only)
+// ─────────────────────────────────────────────────────────
+export const getPendingQueue = asyncHandler(async (req: Request, res: Response) => {
+  const result = await query(
+    `SELECT c.id, c.title, c.description, c.content_type, c.status,
+            c.duration, c.file_size_bytes, c.thumbnail_path, c.file_path,
+            c.created_at, c.updated_at,
+            u.username AS submitted_by_username, u.full_name AS submitted_by_name
+     FROM content c
+     LEFT JOIN users u ON u.id = c.created_by
+     WHERE c.status = 'pending' AND c.deleted_at IS NULL
+     ORDER BY c.created_at ASC`,
+    []
+  );
+
+  res.json({ success: true, data: result.rows });
+});
+
+// ─────────────────────────────────────────────────────────
+// GET /api/upload/pending/count
+// Returns count of pending submissions (for sidebar badge)
+// ─────────────────────────────────────────────────────────
+export const getPendingCount = asyncHandler(async (req: Request, res: Response) => {
+  const result = await query(
+    `SELECT COUNT(*)::int AS count FROM content
+     WHERE status = 'pending' AND deleted_at IS NULL`,
+    []
+  );
+
+  res.json({ success: true, count: result.rows[0].count });
+});
+
+// ─────────────────────────────────────────────────────────
+// PATCH /api/upload/:id/review
+// Approve, curate (edit + approve), or reject a pending item
+// Body (discriminated union):
+//   { action: 'approve' }
+//   { action: 'curate', title?, description?, category_id?, is_featured? }
+//   { action: 'reject', reason: string }
+// ─────────────────────────────────────────────────────────
+export const reviewContent = asyncHandler(async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const userId = req.user!.id;
+  const { action, ...payload } = req.body as {
+    action: 'approve' | 'curate' | 'reject';
+    reason?: string;
+    title?: string;
+    description?: string;
+    category_id?: string;
+    is_featured?: boolean;
+  };
+
+  if (!['approve', 'curate', 'reject'].includes(action)) {
+    throw new AppError('Invalid action. Must be approve, curate, or reject.', 400);
+  }
+
+  if (action === 'reject' && !payload.reason?.trim()) {
+    throw new AppError('A rejection reason is required.', 400);
+  }
+
+  // Fetch the content
+  const existing = await query(
+    `SELECT * FROM content WHERE id = $1 AND deleted_at IS NULL`,
+    [id]
+  );
+
+  if (existing.rowCount === 0) {
+    throw new AppError('Content not found', 404);
+  }
+
+  const content = existing.rows[0];
+
+  if (content.status !== 'pending') {
+    throw new AppError(`Content is not pending (current status: ${content.status})`, 409);
+  }
+
+  if (action === 'reject') {
+    await query(
+      `UPDATE content
+       SET status = 'rejected', rejected_reason = $1, updated_by = $2, updated_at = NOW()
+       WHERE id = $3`,
+      [payload.reason, userId, id]
+    );
+
+    return res.json({ success: true, message: 'Content rejected.' });
+  }
+
+  // approve or curate
+  const newTitle       = payload.title       ?? content.title;
+  const newDescription = payload.description ?? content.description;
+  const newCategoryId  = payload.category_id ?? content.category_id;
+  const newIsFeatured  = payload.is_featured  ?? content.is_featured;
+
+  await query(
+    `UPDATE content
+     SET status = 'active', rejected_reason = NULL,
+         title = $1, description = $2, category_id = $3, is_featured = $4,
+         updated_by = $5, updated_at = NOW()
+     WHERE id = $6`,
+    [newTitle, newDescription, newCategoryId, newIsFeatured, userId, id]
+  );
+
+  res.json({ success: true, message: `Content ${action === 'curate' ? 'curated and ' : ''}approved.` });
 });

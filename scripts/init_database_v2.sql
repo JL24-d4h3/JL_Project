@@ -150,7 +150,8 @@ CREATE TABLE content (
     rating_count INT DEFAULT 0,
     
     -- Estado
-    status VARCHAR(50) DEFAULT 'active' CHECK (status IN ('active', 'archived', 'processing', 'failed')),
+    status VARCHAR(50) DEFAULT 'pending' CHECK (status IN ('pending', 'active', 'rejected', 'archived', 'processing', 'failed')),
+    rejected_reason TEXT,
     priority INT DEFAULT 5 CHECK (priority BETWEEN 1 AND 10),
     is_featured BOOLEAN DEFAULT false,
     
