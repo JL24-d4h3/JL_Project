@@ -148,7 +148,7 @@ export default function Layout() {
 
         {/* Scrollable content */}
         <main className="flex-1 overflow-y-auto">
-          <div className="px-5 py-5 lg:px-7 lg:py-7 max-w-6xl">
+          <div className="px-6 py-6">
             <Suspense fallback={
               <div className="flex items-center justify-center h-48">
                 <div className="w-5 h-5 border-2 border-blue-700 border-t-transparent rounded-full animate-spin" />
@@ -164,7 +164,7 @@ export default function Layout() {
         position="bottom-right"
         toastOptions={{
           duration: 4000,
-          style: { fontSize: '13px', fontFamily: 'Inter, sans-serif', borderRadius: '10px' },
+          style: { fontSize: '15px', fontFamily: 'Inter, sans-serif', borderRadius: '10px' },
           success: { iconTheme: { primary: '#1d4ed8', secondary: '#fff' } },
         }}
       />
