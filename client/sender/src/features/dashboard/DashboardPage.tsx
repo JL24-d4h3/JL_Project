@@ -53,7 +53,7 @@ export default function DashboardPage() {
   const recent: Submission[] = submissions.slice(0, 5)
 
   return (
-    <div className="space-y-6 max-w-5xl">
+    <div className="space-y-6">
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 lg:gap-4">

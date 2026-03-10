@@ -128,7 +128,7 @@ export default function UploadPage() {
   // ── Success screen ──────────────────────────────────────────
   if (status === 'success') {
     return (
-      <div className="max-w-lg mx-auto mt-16 text-center">
+      <div className="mt-16 text-center">
         <div className="w-14 h-14 rounded-full bg-blue-50 border border-blue-200 flex items-center justify-center mx-auto mb-4">
           <CheckCircle2 size={28} className="text-blue-600" />
         </div>
@@ -142,7 +142,7 @@ export default function UploadPage() {
   }
 
   return (
-    <form onSubmit={handleSubmit(onSubmit)} className="max-w-3xl space-y-5">
+    <form onSubmit={handleSubmit(onSubmit)} className="space-y-5">
 
       {/* ── Dropzone ─────────────────────────────────────── */}
       <div

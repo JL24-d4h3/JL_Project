@@ -33,7 +33,7 @@ export default function SubmissionsPage() {
   })
 
   return (
-    <div className="max-w-5xl space-y-4">
+    <div className="space-y-4">
 
       {/* Toolbar */}
       <div className="flex flex-col sm:flex-row sm:items-center gap-3">

@@ -28,7 +28,7 @@ export default function SubmissionDetailPage() {
 
   if (isLoading) {
     return (
-      <div className="max-w-2xl space-y-4">
+      <div className="space-y-4">
         <div className="h-5 w-36 bg-slate-100 rounded animate-pulse" />
         <div className="card p-6 space-y-4">
           {[100, 80, 60, 40].map(w => (
@@ -41,7 +41,7 @@ export default function SubmissionDetailPage() {
 
   if (isError || !sub) {
     return (
-      <div className="max-w-2xl">
+      <div className="w-full">
         <Link to="/submissions" className="inline-flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700 mb-5">
           <ArrowLeft size={15} /> Volver a mis envíos
         </Link>
@@ -57,7 +57,7 @@ export default function SubmissionDetailPage() {
   const meta = STATUS_META[sub.status]
 
   return (
-    <div className="max-w-2xl space-y-5">
+    <div className="space-y-5">
 
       <Link to="/submissions" className="inline-flex items-center gap-2 text-sm text-slate-500 hover:text-slate-700">
         <ArrowLeft size={15} /> Volver a mis envíos
