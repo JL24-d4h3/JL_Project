@@ -6,9 +6,9 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
-  UploadCloud, FileVideo, FileText, Music,
+  UploadCloud, FileVideo, FileText, Music, Image,
   X, CheckCircle2, AlertCircle, Loader2,
-  ChevronDown,
+  ChevronDown, File,
 } from 'lucide-react'
 import { useCategories } from '../../hooks/queries'
 import { formatBytes } from '../../utils/format'
@@ -18,19 +18,66 @@ const schema = z.object({
   title:       z.string().min(3, 'El título debe tener al menos 3 caracteres'),
   description: z.string().max(500, 'Máximo 500 caracteres').optional(),
   category_id: z.string().min(1, 'Selecciona una categoría'),
-  is_featured: z.boolean().optional(),
 })
 type FormValues = z.infer<typeof schema>
 
-// ── File type helpers ─────────────────────────────────────────
-const ACCEPTED = {
-  'video/*':    [],
-  'audio/*':    [],
+// ── Accepted MIME types ───────────────────────────────────────
+const ACCEPTED: Record<string, string[]> = {
+  // Video
+  'video/mp4': [], 'video/webm': [], 'video/ogg': [], 'video/quicktime': [],
+  'video/x-msvideo': [], 'video/x-matroska': [],
+  // Audio
+  'audio/mpeg': [], 'audio/wav': [], 'audio/ogg': [], 'audio/mp4': [],
+  'audio/flac': [], 'audio/aac': [], 'audio/x-flac': [],
+  // Images
+  'image/jpeg': [], 'image/png': [], 'image/gif': [], 'image/webp': [],
+  'image/svg+xml': [], 'image/bmp': [],
+  // Documents
   'application/pdf': [],
+  'application/msword': [],
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document': [],
+  'application/vnd.ms-excel': [],
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': [],
+  'application/vnd.ms-powerpoint': [],
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation': [],
+  // Code / text (server validates extension)
+  'text/plain': [],
+  'text/html': [], 'text/css': [], 'text/javascript': [],
+  'application/json': [], 'application/xml': [], 'text/xml': [],
+  'text/markdown': [],
+  // Specific code MIME types
+  'text/x-python': [], 'text/x-script.python': [],
+  'text/x-java-source': [], 'text/x-java': [],
+  'text/x-c': [], 'text/x-c++': [], 'text/x-csrc': [], 'text/x-c++src': [],
+  'text/x-csharp': [],
+  'text/x-go': [],
+  'text/x-ruby': [], 'text/x-script.ruby': [],
+  'text/x-php': [], 'application/x-php': [],
+  'text/x-rust': [],
+  'text/x-sh': [], 'application/x-sh': [],
+  'application/javascript': [], 'application/x-javascript': [],
+  'application/typescript': [], 'text/typescript': [],
+  // Archives
+  'application/zip': [], 'application/x-zip-compressed': [],
+  'application/x-rar-compressed': [], 'application/x-7z-compressed': [],
+  'application/x-tar': [], 'application/gzip': [],
+  // Fallback for code files reported as octet-stream
+  'application/octet-stream': [],
 }
+
 function fileIcon(mime: string) {
-  if (mime.startsWith('video/')) return <FileVideo size={20} className="text-blue-600" />
-  if (mime.startsWith('audio/')) return <Music size={20} className="text-blue-600" />
+  if (mime.startsWith('video/'))       return <FileVideo size={20} className="text-blue-600" />
+  if (mime.startsWith('audio/'))       return <Music size={20} className="text-blue-600" />
+  if (mime.startsWith('image/'))       return <Image size={20} className="text-blue-600" />
+  if (mime === 'application/pdf')      return <FileText size={20} className="text-red-500" />
+  if (mime.includes('spreadsheet') || mime.includes('excel'))
+                                       return <FileText size={20} className="text-green-600" />
+  if (mime.includes('presentationml') || mime.includes('powerpoint'))
+                                       return <FileText size={20} className="text-orange-500" />
+  if (mime.includes('wordprocessing') || mime === 'application/msword')
+                                       return <FileText size={20} className="text-blue-500" />
+  if (mime.startsWith('text/') || mime === 'application/json' || mime === 'application/xml')
+                                       return <File size={20} className="text-slate-500" />
   return <FileText size={20} className="text-blue-600" />
 }
 
@@ -46,11 +93,13 @@ function uploadWithProgress(
     fd.append('title',       fields.title)
     fd.append('description', fields.description ?? '')
     fd.append('category_id', fields.category_id)
-    fd.append('is_featured', String(fields.is_featured ?? false))
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/upload')
     xhr.withCredentials = true
+
+    const token = localStorage.getItem('token')
+    if (token) xhr.setRequestHeader('Authorization', `Bearer ${token}`)
 
     xhr.upload.onprogress = (e) => {
       if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100))
@@ -90,16 +139,24 @@ export default function UploadPage() {
     mode: 'onChange',
   })
 
+  // Build hierarchical structure for dropdown
+  const rootCats = categories.filter(c => c.parent_id === null)
+  const subCats  = (parentId: string) => categories.filter(c => c.parent_id === parentId)
+
   const onDrop = useCallback((accepted: File[]) => {
-    if (accepted[0]) setFile(accepted[0])
+    if (accepted[0]) { setFile(accepted[0]); setErrMsg('') }
   }, [])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: ACCEPTED,
     maxFiles: 1,
-    maxSize: 2 * 1024 * 1024 * 1024, // 2 GB
-    onDropRejected: () => setErrMsg('Archivo no válido (máx. 2 GB, formatos: video, audio, PDF)'),
+    maxSize: 500 * 1024 * 1024, // 500 MB
+    onDropRejected: (rej) => {
+      const err = rej[0]?.errors[0]
+      if (err?.code === 'file-too-large') setErrMsg('El archivo supera el límite de 500 MB.')
+      else setErrMsg('Tipo de archivo no permitido. Consulta los formatos aceptados.')
+    },
   })
 
   const clearFile = (e: React.MouseEvent) => {
@@ -159,7 +216,6 @@ export default function UploadPage() {
         <input {...getInputProps()} />
 
         {file ? (
-          /* File preview */
           <div className="flex items-center gap-4 px-5 py-4">
             <div className="w-10 h-10 rounded-lg bg-blue-100 flex items-center justify-center shrink-0">
               {fileIcon(file.type)}
@@ -178,7 +234,6 @@ export default function UploadPage() {
             </button>
           </div>
         ) : (
-          /* Empty state */
           <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
             <div className="w-12 h-12 rounded-full bg-slate-100 flex items-center justify-center mb-3">
               <UploadCloud size={22} className="text-slate-400" />
@@ -190,7 +245,7 @@ export default function UploadPage() {
               o <span className="text-blue-700 font-medium cursor-pointer">selecciona desde tu equipo</span>
             </p>
             <p className="text-xs text-slate-400 mt-3 bg-slate-50 px-3 py-1.5 rounded-full">
-              Video · Audio · PDF &nbsp;·&nbsp; Máx. 2 GB
+              Video · Audio · Imagen · PDF · Word · Excel · PowerPoint · Código · ZIP &nbsp;·&nbsp; Máx. 500 MB
             </p>
           </div>
         )}
@@ -236,7 +291,7 @@ export default function UploadPage() {
           )}
         </div>
 
-        {/* Category */}
+        {/* Category — hierarchical optgroup */}
         <div>
           <label className="label">Categoría <span className="text-red-500">*</span></label>
           <div className="relative">
@@ -253,9 +308,22 @@ export default function UploadPage() {
                   <option value="">
                     {loadingCats ? 'Cargando categorías...' : 'Seleccionar categoría'}
                   </option>
-                  {categories.map(cat => (
-                    <option key={cat.id} value={cat.id}>{cat.name}</option>
-                  ))}
+                  {rootCats.map(root => {
+                    const children = subCats(root.id)
+                    if (children.length === 0) {
+                      // Root category without children — selectable
+                      return (
+                        <option key={root.id} value={root.id}>{root.name}</option>
+                      )
+                    }
+                    return (
+                      <optgroup key={root.id} label={root.name}>
+                        {children.map(child => (
+                          <option key={child.id} value={child.id}>{child.name}</option>
+                        ))}
+                      </optgroup>
+                    )
+                  })}
                 </select>
               )}
             />
@@ -266,36 +334,6 @@ export default function UploadPage() {
               <AlertCircle size={12} /> {errors.category_id.message}
             </p>
           )}
-        </div>
-
-        {/* Featured toggle */}
-        <div className="flex items-start gap-3 pt-1">
-          <Controller
-            name="is_featured"
-            control={control}
-            defaultValue={false}
-            render={({ field }) => (
-              <button
-                type="button"
-                role="switch"
-                aria-checked={field.value}
-                onClick={() => field.onChange(!field.value)}
-                className={[
-                  'relative w-10 h-6 rounded-full transition-colors shrink-0 mt-0.5 focus:outline-none focus:ring-2 focus:ring-blue-600 focus:ring-offset-1',
-                  field.value ? 'bg-blue-700' : 'bg-slate-200',
-                ].join(' ')}
-              >
-                <span className={[
-                  'absolute top-1 left-1 w-4 h-4 rounded-full bg-white shadow-sm transition-transform',
-                  field.value ? 'translate-x-4' : 'translate-x-0',
-                ].join(' ')} />
-              </button>
-            )}
-          />
-          <div>
-            <p className="text-sm font-medium text-slate-700">Marcar como destacado</p>
-            <p className="text-xs text-slate-400 mt-0.5">El administrador puede activar esto si considera que el contenido es relevante.</p>
-          </div>
         </div>
       </div>
 

@@ -11,6 +11,7 @@ import authRoutes from './routes/auth.js';
 import categoryRoutes from './routes/categories.js';
 import contentRoutes from './routes/content.js';
 import uploadRoutes from './routes/upload.js';
+import systemRoutes from './routes/system.js';
 
 // Cargar variables de entorno
 dotenv.config();
@@ -35,6 +36,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/content', contentRoutes);
 app.use('/api/upload', uploadRoutes);
+app.use('/api/system', systemRoutes);
 
 // Ruta de prueba
 app.get('/health', async (req, res) => {

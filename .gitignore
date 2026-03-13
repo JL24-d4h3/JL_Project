@@ -157,6 +157,9 @@ storage/documents/**/*
 storage/thumbnails/**/*
 storage/temp/**/*
 storage/archived/**/*
+storage/audio/**/*
+storage/images/**/*
+storage/code/**/*
 
 # Mantener estructura de directorios
 !storage/videos/.gitkeep
@@ -164,6 +167,9 @@ storage/archived/**/*
 !storage/thumbnails/.gitkeep
 !storage/temp/.gitkeep
 !storage/archived/.gitkeep
+!storage/audio/.gitkeep
+!storage/images/.gitkeep
+!storage/code/.gitkeep
 
 # Backups
 backups/**/*
@@ -283,6 +289,10 @@ client/build/
 server/dist/
 server/build/
 
+# Vite generated deps cache
+search_ui/.vite/
+**/.vite/
+
 # TypeScript
 *.js.map
 
@@ -314,8 +324,6 @@ tests/e2e/screenshots/
 *.bak
 *.orig
 
-# Excluir todos los archivos Markdown
-*.md
-
-# Excepción opcional:
-#!README.md
+# Excluir Markdown de dependencias
+node_modules/**/*.md
+search_ui/node_modules/**/*.md

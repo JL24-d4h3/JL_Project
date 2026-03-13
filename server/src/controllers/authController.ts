@@ -129,7 +129,7 @@ export const getMe = asyncHandler(async (req: Request, res: Response) => {
 // POST /api/auth/logout
 export const logout = asyncHandler(async (req: Request, res: Response) => {
   const token = req.headers.authorization?.replace('Bearer ', '');
-  
+
   if (token) {
     const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
     await query('UPDATE sessions SET is_active = false WHERE token_hash = $1', [tokenHash]);
@@ -139,4 +139,16 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
     success: true,
     message: 'Logged out successfully',
   });
+});
+
+// GET /api/auth/users - Lista de usuarios (solo admin/superadmin)
+export const getUsers = asyncHandler(async (_req: Request, res: Response) => {
+  const result = await query(
+    `SELECT id, username, email, full_name, role, is_active, last_login, created_at
+     FROM users
+     ORDER BY role ASC, created_at ASC`,
+    []
+  );
+
+  res.json({ success: true, data: result.rows, count: result.rowCount });
 });

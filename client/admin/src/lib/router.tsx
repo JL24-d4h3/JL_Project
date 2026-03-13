@@ -11,17 +11,22 @@ const UsersPage        = lazy(() => import('../features/users/UsersPage'))
 const DashboardPage    = lazy(() => import('../features/dashboard/DashboardPage'))
 
 export const router = createBrowserRouter([
+  // Login: sin Layout (página completa independiente)
+  {
+    path: '/login',
+    element: <LoginPage />,
+  },
+  // Resto: dentro del Layout con sidebar
   {
     path: '/',
     element: <App />,
     children: [
-      { index: true,                      element: <ReviewQueuePage /> },
-      { path: 'login',                    element: <LoginPage /> },
-      { path: 'review/:id',               element: <ReviewDetailPage /> },
-      { path: 'content',                  element: <ContentPage /> },
-      { path: 'categories',               element: <CategoriesPage /> },
-      { path: 'users',                    element: <UsersPage /> },
-      { path: 'dashboard',                element: <DashboardPage /> },
+      { index: true,          element: <ReviewQueuePage /> },
+      { path: 'review/:id',   element: <ReviewDetailPage /> },
+      { path: 'content',      element: <ContentPage /> },
+      { path: 'categories',   element: <CategoriesPage /> },
+      { path: 'users',        element: <UsersPage /> },
+      { path: 'dashboard',    element: <DashboardPage /> },
     ],
   },
 ])

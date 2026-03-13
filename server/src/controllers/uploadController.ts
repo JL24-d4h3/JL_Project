@@ -1,58 +1,46 @@
 import { Request, Response } from 'express';
 import path from 'path';
+import fs from 'fs/promises';
 import { query } from '../config/database.js';
 import { asyncHandler, AppError } from '../types/express.js';
 import { storageService } from '../services/storageService.js';
 import { ffmpegService } from '../services/ffmpegService.js';
 import { getContentTypeFromMime, getStorageFolderFromMime } from '../middleware/upload.js';
 
+const STORAGE_BASE = process.env.STORAGE_PATH || '/home/jleon/2026/PUCP/GTR/CDN/storage';
+
 /**
- * POST /api/content
- * Upload de archivos (video, PDF, audio, imágenes)
- * Solo SUPERADMIN (fácilmente extensible a otros roles)
- * 
- * Arquitectura:
- * 1. Multer recibe archivo → temp/
- * 2. Validar y procesar
- * 3. Calcular hash y mover a storage permanente
- * 4. Extraer metadata (FFmpeg para videos)
- * 5. Generar thumbnail (videos)
- * 6. Insertar en DB con status 'processing' → 'active'
+ * POST /api/upload
+ * Upload de archivos — el archivo queda en temp/ hasta que el admin lo revise.
+ * En aprobación → se mueve a la carpeta definitiva.
+ * En rechazo → se elimina de temp/.
  */
 export const uploadContent = asyncHandler(async (req: Request, res: Response) => {
-  // Validar que hay archivo
   if (!req.file) {
     throw new AppError('No file uploaded', 400);
   }
 
-  // Validar campos requeridos
   const { title, description, category_id, is_featured } = req.body;
 
-  if (!title) {
-    throw new AppError('Title is required', 400);
-  }
-
-  if (!category_id) {
-    throw new AppError('Category ID is required', 400);
-  }
+  if (!title) throw new AppError('Title is required', 400);
+  if (!category_id) throw new AppError('Category ID is required', 400);
 
   const file = req.file;
-  const userId = req.user!.id; // Garantizado por authenticate middleware
+  const userId = req.user!.id;
   const contentType = getContentTypeFromMime(file.mimetype, file.originalname);
-  const storageFolder = getStorageFolderFromMime(file.mimetype, file.originalname);
-  const extension = path.extname(file.originalname);
+
+  // Ruta relativa del archivo temporal (para guardar en DB)
+  const relativeTempPath = `temp/${path.basename(file.path)}`;
 
   console.log(`📤 Processing upload: ${file.originalname} (${contentType})`);
 
   try {
-    // 1. Mover archivo a storage permanente y calcular hash
-    const { filePath, fileHash, fileSize } = await storageService.moveToStorage(
-      file.path,
-      storageFolder,
-      extension
-    );
+    // 1. Calcular hash del archivo en temp (para detección de duplicados)
+    const fileHash = await storageService.calculateFileHash(file.path);
+    const stats = await fs.stat(file.path);
+    const fileSize = stats.size;
 
-    console.log(`✓ File moved to storage: ${filePath} (hash: ${fileHash})`);
+    console.log(`✓ File hash calculated: ${fileHash} (${fileSize} bytes)`);
 
     // 2. Verificar duplicados por hash
     const duplicateCheck = await query(
@@ -62,13 +50,15 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
 
     if (duplicateCheck.rowCount! > 0) {
       const duplicate = duplicateCheck.rows[0];
+      // Eliminar el archivo temporal ya que es duplicado
+      await storageService.deleteFile(relativeTempPath);
       throw new AppError(
         `Duplicate file detected. Already exists as: "${duplicate.title}" (ID: ${duplicate.id})`,
         409
       );
     }
 
-    // 3. Extraer metadata según tipo
+    // 3. Extraer metadata según tipo (en el archivo temporal)
     let metadata: any = {};
     let thumbnailPath: string | null = null;
     let duration: number | null = null;
@@ -77,31 +67,28 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
 
     if (contentType === 'video') {
       console.log('🎬 Extracting video metadata...');
-      
       try {
-        const videoMetadata = await ffmpegService.extractVideoMetadata(filePath);
-        
+        const videoMetadata = await ffmpegService.extractVideoMetadata(file.path);
+
         metadata = {
           codec: videoMetadata.codec,
           fps: videoMetadata.fps,
           hasAudio: videoMetadata.hasAudio,
         };
-        
+
         duration = videoMetadata.duration;
         resolution = videoMetadata.resolution;
         bitrate = videoMetadata.bitrate;
 
         console.log(`✓ Video metadata: ${resolution}, ${duration}s, ${videoMetadata.codec}`);
 
-        // 4. Generar thumbnail
+        // 4. Generar thumbnail (los thumbnails van directo a thumbnails/, no a temp)
         console.log('🖼️  Generating thumbnail...');
         const thumbnailName = `${fileHash}.jpg`;
-        thumbnailPath = await ffmpegService.generateThumbnail(filePath, thumbnailName);
+        thumbnailPath = await ffmpegService.generateThumbnail(file.path, thumbnailName);
         console.log(`✓ Thumbnail generated: ${thumbnailPath}`);
-
       } catch (error: any) {
         console.warn(`⚠️  FFmpeg processing failed: ${error.message}`);
-        // No falla el upload, solo no tiene metadata/thumbnail
       }
     }
 
@@ -109,11 +96,11 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
     const slug = title
       .toLowerCase()
       .normalize('NFD')
-      .replace(/[\u0300-\u036f]/g, '') // Remover acentos
+      .replace(/[\u0300-\u036f]/g, '')
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '');
 
-    // 6. Insertar en base de datos
+    // 6. Insertar en DB — file_path apunta a temp/ hasta que se apruebe
     const result = await query(
       `INSERT INTO content (
         title, slug, description, type, category_id,
@@ -136,7 +123,7 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
         description || null,
         contentType,
         category_id,
-        filePath,
+        relativeTempPath,   // ← archivo queda en temp/ hasta aprobación
         fileSize,
         fileHash,
         file.mimetype,
@@ -145,18 +132,16 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
         bitrate,
         thumbnailPath,
         JSON.stringify(metadata),
-        'pending', // Awaiting admin review before going active
+        'pending',
         is_featured === 'true' || is_featured === true,
         userId,
       ]
     );
 
     const content = result.rows[0];
-
-    console.log(`✅ Content uploaded successfully: ${content.id}`);
+    console.log(`✅ Content queued for review: ${content.id}`);
 
     // Disparar ingesta en el AI Engine de forma asíncrona (fire-and-forget)
-    // No esperamos la respuesta para no bloquear la respuesta al cliente
     const aiEngineUrl = process.env.AI_ENGINE_URL || 'http://localhost:8000';
     (async () => {
       try {
@@ -164,22 +149,21 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ content_id: content.id }),
-          signal: AbortSignal.timeout(5000),  // timeout de 5 s para el encolado
+          signal: AbortSignal.timeout(5000),
         });
         if (ingestRes.ok) {
           console.log(`🤖 AI ingest encolado para content_id=${content.id}`);
         } else {
-          console.warn(`⚠️  AI Engine respondió ${ingestRes.status} al engestin content_id=${content.id}`);
+          console.warn(`⚠️  AI Engine respondió ${ingestRes.status}`);
         }
       } catch (err: any) {
-        // El AI Engine puede no estar corriendo en desarrollo — no falla el upload
-        console.warn(`⚠️  No se pudo contactar al AI Engine para ingesta: ${err?.message ?? err}`);
+        console.warn(`⚠️  No se pudo contactar al AI Engine: ${err?.message ?? err}`);
       }
     })();
 
     res.status(201).json({
       success: true,
-      message: 'Content uploaded successfully',
+      message: 'Content uploaded successfully and pending review',
       data: {
         id: content.id,
         title: content.title,
@@ -195,19 +179,17 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
       },
     });
   } catch (error) {
-    // Cleanup: eliminar archivo temporal si algo falla
+    // Cleanup: eliminar archivo temporal si algo falla (excepto duplicados, ya eliminados arriba)
     try {
-      await storageService.deleteFile(file.path);
+      const fileExists = await storageService.fileExists(relativeTempPath);
+      if (fileExists) await storageService.deleteFile(relativeTempPath);
     } catch {}
-    
     throw error;
   }
 });
 
 /**
  * GET /api/content/:id/status
- * Obtener estado de procesamiento de un contenido
- * Útil para uploads asíncronos con queue system
  */
 export const getContentStatus = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -237,15 +219,12 @@ export const getContentStatus = asyncHandler(async (req: Request, res: Response)
 
 /**
  * DELETE /api/content/:id
- * Eliminar contenido (soft delete en DB + hard delete de archivos físicos)
- * Solo SUPERADMIN y el creador original
  */
 export const deleteContent = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
   const userId = req.user!.id;
   const userRole = req.user!.role;
 
-  // Obtener contenido
   const result = await query(
     'SELECT * FROM content WHERE id = $1 AND deleted_at IS NULL',
     [id]
@@ -257,64 +236,51 @@ export const deleteContent = asyncHandler(async (req: Request, res: Response) =>
 
   const content = result.rows[0];
 
-  // Verificar permisos: superadmin o creador
   if (userRole !== 'superadmin' && content.created_by !== userId) {
     throw new AppError('You do not have permission to delete this content', 403);
   }
 
-  // Soft delete en DB
   await query(
     'UPDATE content SET deleted_at = NOW(), updated_by = $1 WHERE id = $2',
     [userId, id]
   );
 
-  // Hard delete de archivos físicos (asíncrono, no bloquea la respuesta)
   (async () => {
     try {
-      // Eliminar archivo principal
       if (content.file_path) {
         await storageService.deleteFile(content.file_path);
         console.log(`  ✓ Deleted file: ${content.file_path}`);
       }
-      
-      // Eliminar thumbnail si existe
       if (content.thumbnail_path) {
         await storageService.deleteFile(content.thumbnail_path);
         console.log(`  ✓ Deleted thumbnail: ${content.thumbnail_path}`);
       }
-
-      // Eliminar versiones de calidad si existen
       if (content.quality_versions) {
         const versions = content.quality_versions as any;
-        for (const [quality, filepath] of Object.entries(versions)) {
+        for (const [, filepath] of Object.entries(versions)) {
           await storageService.deleteFile(filepath as string);
-          console.log(`  ✓ Deleted ${quality}: ${filepath}`);
         }
       }
     } catch (error) {
       console.error(`⚠️  Error deleting files for content ${id}:`, error);
-      // No falla la operación, solo logea
     }
   })();
 
   console.log(`🗑️  Content deleted: ${content.title} (${id})`);
 
-  res.json({
-    success: true,
-    message: 'Content deleted successfully',
-  });
+  res.json({ success: true, message: 'Content deleted successfully' });
 });
 
 // ─────────────────────────────────────────────────────────
 // GET /api/upload/mine
-// Returns uploads submitted by the current authenticated user
 // ─────────────────────────────────────────────────────────
 export const getMyUploads = asyncHandler(async (req: Request, res: Response) => {
   const userId = req.user!.id;
 
   const result = await query(
-    `SELECT id, title, description, content_type, status, rejected_reason,
-            duration, file_size_bytes, thumbnail_path, created_at, updated_at
+    `SELECT id, title, description, type AS content_type, status, rejected_reason,
+            duration_seconds AS duration, file_size AS file_size_bytes,
+            thumbnail_path, created_at, updated_at
      FROM content
      WHERE created_by = $1 AND deleted_at IS NULL
      ORDER BY created_at DESC`,
@@ -326,12 +292,12 @@ export const getMyUploads = asyncHandler(async (req: Request, res: Response) => 
 
 // ─────────────────────────────────────────────────────────
 // GET /api/upload/pending
-// Returns all content with status 'pending' (admin only)
 // ─────────────────────────────────────────────────────────
-export const getPendingQueue = asyncHandler(async (req: Request, res: Response) => {
+export const getPendingQueue = asyncHandler(async (_req: Request, res: Response) => {
   const result = await query(
-    `SELECT c.id, c.title, c.description, c.content_type, c.status,
-            c.duration, c.file_size_bytes, c.thumbnail_path, c.file_path,
+    `SELECT c.id, c.title, c.description, c.type AS content_type, c.status,
+            c.duration_seconds AS duration, c.file_size AS file_size_bytes,
+            c.thumbnail_path, c.file_path,
             c.created_at, c.updated_at,
             u.username AS submitted_by_username, u.full_name AS submitted_by_name
      FROM content c
@@ -346,9 +312,8 @@ export const getPendingQueue = asyncHandler(async (req: Request, res: Response) 
 
 // ─────────────────────────────────────────────────────────
 // GET /api/upload/pending/count
-// Returns count of pending submissions (for sidebar badge)
 // ─────────────────────────────────────────────────────────
-export const getPendingCount = asyncHandler(async (req: Request, res: Response) => {
+export const getPendingCount = asyncHandler(async (_req: Request, res: Response) => {
   const result = await query(
     `SELECT COUNT(*)::int AS count FROM content
      WHERE status = 'pending' AND deleted_at IS NULL`,
@@ -360,11 +325,9 @@ export const getPendingCount = asyncHandler(async (req: Request, res: Response) 
 
 // ─────────────────────────────────────────────────────────
 // PATCH /api/upload/:id/review
-// Approve, curate (edit + approve), or reject a pending item
-// Body (discriminated union):
-//   { action: 'approve' }
-//   { action: 'curate', title?, description?, category_id?, is_featured? }
-//   { action: 'reject', reason: string }
+// approve → move file from temp to permanent
+// curate  → edit metadata + move file from temp to permanent
+// reject  → delete temp file
 // ─────────────────────────────────────────────────────────
 export const reviewContent = asyncHandler(async (req: Request, res: Response) => {
   const { id } = req.params;
@@ -386,7 +349,6 @@ export const reviewContent = asyncHandler(async (req: Request, res: Response) =>
     throw new AppError('A rejection reason is required.', 400);
   }
 
-  // Fetch the content
   const existing = await query(
     `SELECT * FROM content WHERE id = $1 AND deleted_at IS NULL`,
     [id]
@@ -402,7 +364,23 @@ export const reviewContent = asyncHandler(async (req: Request, res: Response) =>
     throw new AppError(`Content is not pending (current status: ${content.status})`, 409);
   }
 
+  // ── REJECT ──────────────────────────────────────────────
   if (action === 'reject') {
+    // Eliminar archivo temporal del disco
+    try {
+      await storageService.deleteFile(content.file_path);
+      console.log(`🗑️  Deleted temp file on rejection: ${content.file_path}`);
+    } catch (e) {
+      console.warn(`⚠️  Could not delete temp file: ${content.file_path}`);
+    }
+
+    // Eliminar thumbnail si existe
+    if (content.thumbnail_path) {
+      try {
+        await storageService.deleteFile(content.thumbnail_path);
+      } catch {}
+    }
+
     await query(
       `UPDATE content
        SET status = 'rejected', rejected_reason = $1, updated_by = $2, updated_at = NOW()
@@ -413,7 +391,23 @@ export const reviewContent = asyncHandler(async (req: Request, res: Response) =>
     return res.json({ success: true, message: 'Content rejected.' });
   }
 
-  // approve or curate
+  // ── APPROVE / CURATE ─────────────────────────────────────
+  // Mover archivo de temp/ a la carpeta permanente correspondiente
+  const tempAbsPath = path.join(STORAGE_BASE, content.file_path);
+  const storageFolder = getStorageFolderFromMime(content.mime_type, content.file_path);
+  const ext = path.extname(content.file_path);
+
+  let permanentPath = content.file_path; // fallback si falla el move
+
+  try {
+    const moved = await storageService.moveToStorage(tempAbsPath, storageFolder, ext);
+    permanentPath = moved.filePath;
+    console.log(`✅ File moved to permanent storage: ${permanentPath}`);
+  } catch (moveError: any) {
+    console.error(`⚠️  Failed to move file to permanent storage: ${moveError.message}`);
+    throw new AppError('Failed to move file to permanent storage. Please try again.', 500);
+  }
+
   const newTitle       = payload.title       ?? content.title;
   const newDescription = payload.description ?? content.description;
   const newCategoryId  = payload.category_id ?? content.category_id;
@@ -422,11 +416,12 @@ export const reviewContent = asyncHandler(async (req: Request, res: Response) =>
   await query(
     `UPDATE content
      SET status = 'active', rejected_reason = NULL,
-         title = $1, description = $2, category_id = $3, is_featured = $4,
-         updated_by = $5, updated_at = NOW()
-     WHERE id = $6`,
-    [newTitle, newDescription, newCategoryId, newIsFeatured, userId, id]
+         file_path = $1,
+         title = $2, description = $3, category_id = $4, is_featured = $5,
+         updated_by = $6, updated_at = NOW()
+     WHERE id = $7`,
+    [permanentPath, newTitle, newDescription, newCategoryId, newIsFeatured, userId, id]
   );
 
-  res.json({ success: true, message: `Content ${action === 'curate' ? 'curated and ' : ''}approved.` });
+  return res.json({ success: true, message: `Content ${action === 'curate' ? 'curated and ' : ''}approved.` });
 });

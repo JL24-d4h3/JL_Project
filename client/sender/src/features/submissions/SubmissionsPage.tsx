@@ -55,7 +55,7 @@ export default function SubmissionsPage() {
           ))}
         </div>
 
-        <div className="relative flex-1 max-w-sm">
+        <div className="relative flex-1 min-w-0">
           <input
             type="search"
             value={search}
@@ -102,7 +102,7 @@ export default function SubmissionsPage() {
                     </td>
                   </tr>
                 ))
-              ) : filtered.length === 0 ? (
+              ) : !isError && filtered.length === 0 ? (
                 <tr>
                   <td colSpan={6}>
                     <div className="flex flex-col items-center justify-center py-14 text-center">

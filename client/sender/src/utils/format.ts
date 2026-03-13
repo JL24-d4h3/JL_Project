@@ -1,5 +1,5 @@
 export function formatBytes(bytes: number | null): string {
-  if (!bytes) return '—'
+  if (bytes === null || bytes === undefined) return '—'
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
@@ -13,7 +13,7 @@ export function formatDate(iso: string): string {
 }
 
 export function formatDuration(seconds: number | null): string {
-  if (!seconds) return '—'
+  if (seconds === null || seconds === undefined) return '—'
   const h = Math.floor(seconds / 3600)
   const m = Math.floor((seconds % 3600) / 60)
   const s = Math.floor(seconds % 60)

@@ -102,7 +102,7 @@ export default function DashboardPage() {
               </div>
             ))}
           </div>
-        ) : recent.length === 0 ? (
+        ) : !isError && recent.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-14 text-center">
             <div className="w-11 h-11 rounded-full bg-slate-100 flex items-center justify-center mb-3">
               <Upload size={20} className="text-slate-400" />
