@@ -1,0 +1,58 @@
+@import "tailwindcss";
+@import "katex/dist/katex.min.css";
+
+/* ── Markdown content renderer ──────────────────────────────────────────── */
+.md-content { font-size: 0.875rem; line-height: 1.7; color: #1e293b; }
+.md-content h1,.md-content h2,.md-content h3 {
+  font-weight: 600; color: #0f172a; margin: 1rem 0 0.4rem;
+}
+.md-content h1 { font-size: 1.1rem; }
+.md-content h2 { font-size: 1rem; }
+.md-content h3 { font-size: 0.9rem; }
+.md-content p  { margin: 0.35rem 0; }
+.md-content ul,.md-content ol { padding-left: 1.4rem; margin: 0.4rem 0; }
+.md-content li { margin: 0.15rem 0; }
+.md-content strong { font-weight: 600; color: #0f172a; }
+.md-content em     { font-style: italic; color: #334155; }
+.md-content code   {
+  font-family: ui-monospace, monospace; font-size: 0.79rem;
+  background: rgba(99, 140, 255, 0.10);
+  border: 1px solid rgba(99, 140, 255, 0.18);
+  border-radius: 5px; padding: 0.1em 0.38em;
+  color: #3b5fc0;
+}
+.md-content pre {
+  background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px;
+  padding: 0.85rem 1rem; overflow-x: auto; margin: 0.6rem 0;
+}
+.md-content pre code { background: none; padding: 0; font-size: 0.78rem; color: inherit; }
+.md-content blockquote {
+  border-left: 3px solid #cbd5e1; padding-left: 1rem; margin: 0.6rem 0;
+  color: #64748b; font-style: italic;
+}
+.md-content table { border-collapse: collapse; width: 100%; margin: 0.6rem 0; font-size: 0.8rem; }
+.md-content th {
+  background: #f1f5f9; font-weight: 600; padding: 0.4rem 0.75rem;
+  text-align: left; border: 1px solid #e2e8f0;
+}
+.md-content td { padding: 0.35rem 0.75rem; border: 1px solid #e2e8f0; }
+.md-content tr:nth-child(even) td { background: #f8fafc; }
+/* KaTeX display blocks */
+.md-content .katex-display { margin: 0.7rem 0; overflow-x: auto; }
+.md-content .katex { font-size: 1.05em; }
+
+/* ── Syntax highlighter — strip all token borders/decorations ───────────── */
+.code-block-wrap pre { margin: 0 !important; border: none !important; }
+.code-block-wrap pre,
+.code-block-wrap code,
+.code-block-wrap pre span,
+.code-block-wrap pre code {
+  border: none !important;
+  border-left: none !important;
+  border-right: none !important;
+  border-top: none !important;
+  border-bottom: none !important;
+  text-decoration: none !important;
+  outline: none !important;
+  box-shadow: none !important;
+}

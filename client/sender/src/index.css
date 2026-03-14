@@ -1,0 +1,42 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+    margin: 0;
+  }
+  input, textarea, select {
+    @apply outline-none;
+  }
+}
+
+@layer components {
+  .btn-primary {
+    @apply inline-flex items-center gap-2 bg-blue-700 hover:bg-blue-800 active:bg-blue-900
+           text-white text-base font-semibold px-5 py-3 rounded-lg transition-colors
+           disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 text-slate-600 hover:bg-slate-100
+           text-base font-medium px-4 py-2.5 rounded-lg transition-colors;
+  }
+  .input {
+    @apply w-full px-4 py-3 text-base border border-slate-200 rounded-lg bg-white
+           placeholder:text-slate-400 text-slate-900
+           focus:border-blue-600 focus:ring-2 focus:ring-blue-100 transition;
+  }
+  .label {
+    @apply block text-sm font-semibold text-slate-700 mb-2;
+  }
+  .card {
+    @apply bg-white rounded-xl border border-slate-200 shadow-sm;
+  }
+  .badge {
+    @apply inline-flex items-center gap-1.5 text-sm font-medium px-2.5 py-0.5 rounded-full;
+  }
+}
