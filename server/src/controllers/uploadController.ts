@@ -320,13 +320,17 @@ export const getPendingQueue = asyncHandler(async (_req: Request, res: Response)
   const orphanIds = result.rows.filter((_, i) => !existsChecks[i]).map(r => r.id);
 
   if (orphanIds.length > 0) {
+    // Los ítems de la cola son siempre pending → rechazar con razón visible al teacher
     await query(
-      `UPDATE content SET deleted_at = NOW(), updated_at = NOW()
+      `UPDATE content
+       SET status          = 'rejected',
+           rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+           updated_at      = NOW()
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
       [orphanIds]
     );
     await cacheDelete('content:*');
-    console.log(`[queue] Auto-eliminados ${orphanIds.length} registros huérfanos`);
+    console.log(`[queue] ${orphanIds.length} registros huérfanos → rechazados`);
   }
 
   res.json({ success: true, data: valid });

@@ -24,8 +24,10 @@ function toRelativePath(absolutePath: string): string {
 }
 
 /**
- * Elimina (soft-delete) el registro en BD correspondiente al archivo borrado.
- * También invalida el caché.
+ * Maneja la eliminación de un archivo del filesystem.
+ *
+ * - pending → rejected  (el docente ve el rechazo en "Mis Envíos")
+ * - active  → soft-delete (se retira de la publicación)
  */
 async function handleFileDeleted(absolutePath: string): Promise<void> {
   const relativePath = toRelativePath(absolutePath);
@@ -35,23 +37,40 @@ async function handleFileDeleted(absolutePath: string): Promise<void> {
   if (filename.startsWith('.')) return;
 
   try {
-    const result = await query(
-      `UPDATE content
-       SET deleted_at = NOW(), updated_at = NOW()
-       WHERE file_path = $1
-         AND deleted_at IS NULL
-       RETURNING id, title, status`,
+    // Obtener el estado actual del registro
+    const found = await query(
+      `SELECT id, title, status FROM content
+       WHERE file_path = $1 AND deleted_at IS NULL`,
       [relativePath]
     );
 
-    if (result.rowCount && result.rowCount > 0) {
-      const { id, title, status } = result.rows[0];
-      console.log(`[watcher] Archivo eliminado: "${title}" (${relativePath}) [${status}] → marcado como deleted`);
+    if (!found.rowCount || found.rowCount === 0) return;
 
-      // Invalidar caché de contenido
-      await cacheDelete('content:*');
-      console.log(`[watcher] Caché invalidado para ${id}`);
+    const { id, title, status } = found.rows[0];
+
+    if (status === 'pending') {
+      // El docente esperaba revisión → rechazar con razón clara
+      await query(
+        `UPDATE content
+         SET status          = 'rejected',
+             rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+             updated_at      = NOW()
+         WHERE id = $1`,
+        [id]
+      );
+      console.log(`[watcher] "${title}" (pending) → rejected (archivo eliminado)`);
+    } else {
+      // active u otro → soft-delete, ya no debe mostrarse
+      await query(
+        `UPDATE content
+         SET deleted_at = NOW(), updated_at = NOW()
+         WHERE id = $1`,
+        [id]
+      );
+      console.log(`[watcher] "${title}" (${status}) → soft-deleted (archivo eliminado)`);
     }
+
+    await cacheDelete('content:*');
   } catch (err) {
     console.error(`[watcher] Error al procesar eliminación de ${relativePath}:`, err);
   }

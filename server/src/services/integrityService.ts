@@ -92,7 +92,9 @@ export async function checkIntegrity(): Promise<IntegrityReport> {
 }
 
 /**
- * Repara inconsistencias eliminando registros huérfanos
+ * Repara inconsistencias:
+ * - pending sin archivo → rejected (visible al teacher en "Mis Envíos")
+ * - active sin archivo  → soft-delete
  */
 export async function repairOrphanedRecords(dryRun: boolean = true): Promise<{
   deleted: string[];
@@ -103,14 +105,24 @@ export async function repairOrphanedRecords(dryRun: boolean = true): Promise<{
 
   for (const record of orphanedRecords) {
     if (!dryRun) {
-      // Marcar como eliminado (soft delete)
-      await query(
-        `UPDATE content
-         SET deleted_at = NOW(),
-             updated_at = NOW()
-         WHERE id = $1`,
-        [record.id]
-      );
+      if (record.status === 'pending') {
+        await query(
+          `UPDATE content
+           SET status          = 'rejected',
+               rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+               updated_at      = NOW()
+           WHERE id = $1`,
+          [record.id]
+        );
+      } else {
+        await query(
+          `UPDATE content
+           SET deleted_at = NOW(),
+               updated_at = NOW()
+           WHERE id = $1`,
+          [record.id]
+        );
+      }
     }
     deleted.push(`${record.title} (${record.file_path})`);
   }
