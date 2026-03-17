@@ -11,6 +11,7 @@ const FILTERS: { label: string; value: ContentStatus | 'all' }[] = [
   { label: 'Pendientes', value: 'pending'   },
   { label: 'Aprobados',  value: 'active'    },
   { label: 'Rechazados', value: 'rejected'  },
+  { label: 'Con error',  value: 'failed'    },
 ]
 
 const TYPE_ICON: Record<string, React.ReactNode> = {
@@ -137,6 +138,14 @@ export default function SubmissionsPage() {
                           {sub.status === 'rejected' && sub.rejected_reason && (
                             <p className="text-xs text-red-600 mt-0.5 truncate max-w-[240px]">
                               {sub.rejected_reason}
+                            </p>
+                          )}
+                          {sub.status === 'failed' && (
+                            <p className="text-xs text-orange-600 mt-0.5">
+                              Ocurrió un error.{' '}
+                              <Link to="/upload" className="underline hover:text-orange-800">
+                                Vuelve a subirlo
+                              </Link>
                             </p>
                           )}
                         </div>

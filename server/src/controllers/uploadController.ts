@@ -43,9 +43,12 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
 
     console.log(`✓ File hash calculated: ${fileHash} (${fileSize} bytes)`);
 
-    // 2. Verificar duplicados por hash
+    // 2. Verificar duplicados por hash (solo entre archivos activos o pendientes)
     const duplicateCheck = await query(
-      'SELECT id, title FROM content WHERE file_hash = $1 AND deleted_at IS NULL',
+      `SELECT id, title FROM content
+       WHERE file_hash = $1
+         AND deleted_at IS NULL
+         AND status NOT IN ('rejected', 'failed')`,
       [fileHash]
     );
 
@@ -54,10 +57,21 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
       // Eliminar el archivo temporal ya que es duplicado
       await storageService.deleteFile(relativeTempPath);
       throw new AppError(
-        `Duplicate file detected. Already exists as: "${duplicate.title}" (ID: ${duplicate.id})`,
+        `Este archivo ya existe en el sistema como «${duplicate.title}». Si necesitas reemplazarlo, contacta al administrador.`,
         409
       );
     }
+
+    // 2b. Limpiar registros antiguos rejected/failed con el mismo hash
+    // para que el INSERT no viole la constraint UNIQUE en file_hash.
+    await query(
+      `UPDATE content
+       SET deleted_at = NOW(), updated_at = NOW()
+       WHERE file_hash = $1
+         AND deleted_at IS NULL
+         AND status IN ('rejected', 'failed')`,
+      [fileHash]
+    );
 
     // 3. Extraer metadata según tipo (en el archivo temporal)
     let metadata: any = {};
@@ -320,17 +334,17 @@ export const getPendingQueue = asyncHandler(async (_req: Request, res: Response)
   const orphanIds = result.rows.filter((_, i) => !existsChecks[i]).map(r => r.id);
 
   if (orphanIds.length > 0) {
-    // Los ítems de la cola son siempre pending → rechazar con razón visible al teacher
+    // Los ítems de la cola son siempre pending → marcar como fallo del sistema
     await query(
       `UPDATE content
-       SET status          = 'rejected',
-           rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+       SET status          = 'failed',
+           rejected_reason = 'Ocurrió un error con el archivo. Por favor vuelve a subirlo.',
            updated_at      = NOW()
        WHERE id = ANY($1::uuid[]) AND deleted_at IS NULL`,
       [orphanIds]
     );
     await cacheDelete('content:*');
-    console.log(`[queue] ${orphanIds.length} registros huérfanos → rechazados`);
+    console.log(`[queue] ${orphanIds.length} registros huérfanos → failed`);
   }
 
   res.json({ success: true, data: valid });

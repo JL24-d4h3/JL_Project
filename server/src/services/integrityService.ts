@@ -93,7 +93,7 @@ export async function checkIntegrity(): Promise<IntegrityReport> {
 
 /**
  * Repara inconsistencias:
- * - pending sin archivo → rejected (visible al teacher en "Mis Envíos")
+ * - pending sin archivo → failed (sistema, no decisión admin; visible al teacher en "Mis Envíos")
  * - active sin archivo  → soft-delete
  */
 export async function repairOrphanedRecords(dryRun: boolean = true): Promise<{
@@ -108,8 +108,8 @@ export async function repairOrphanedRecords(dryRun: boolean = true): Promise<{
       if (record.status === 'pending') {
         await query(
           `UPDATE content
-           SET status          = 'rejected',
-               rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+           SET status          = 'failed',
+               rejected_reason = 'Ocurrió un error con el archivo. Por favor vuelve a subirlo.',
                updated_at      = NOW()
            WHERE id = $1`,
           [record.id]

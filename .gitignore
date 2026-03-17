@@ -326,4 +326,3 @@ tests/e2e/screenshots/
 
 # Excluir Markdown de dependencias
 node_modules/**/*.md
-search_ui/node_modules/**/*.md

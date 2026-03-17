@@ -26,8 +26,9 @@ function toRelativePath(absolutePath: string): string {
 /**
  * Maneja la eliminación de un archivo del filesystem.
  *
- * - pending → rejected  (el docente ve el rechazo en "Mis Envíos")
+ * - pending → failed    (error del sistema; el docente ve aviso y puede re-subir)
  * - active  → soft-delete (se retira de la publicación)
+ * - rejected / failed / archived → ignorar (borrarlo del disco es parte del proceso normal)
  */
 async function handleFileDeleted(absolutePath: string): Promise<void> {
   const relativePath = toRelativePath(absolutePath);
@@ -48,17 +49,21 @@ async function handleFileDeleted(absolutePath: string): Promise<void> {
 
     const { id, title, status } = found.rows[0];
 
+    // Solo nos importa actuar sobre pending y active.
+    // rejected / failed / archived: el archivo ya se borró de forma controlada → ignorar.
+    if (!['pending', 'active'].includes(status)) return;
+
     if (status === 'pending') {
-      // El docente esperaba revisión → rechazar con razón clara
+      // El docente esperaba revisión → marcar como fallo del sistema (no rechazo admin)
       await query(
         `UPDATE content
-         SET status          = 'rejected',
-             rejected_reason = 'El archivo fue eliminado del sistema antes de ser revisado.',
+         SET status          = 'failed',
+             rejected_reason = 'Ocurrió un error con el archivo. Por favor vuelve a subirlo.',
              updated_at      = NOW()
          WHERE id = $1`,
         [id]
       );
-      console.log(`[watcher] "${title}" (pending) → rejected (archivo eliminado)`);
+      console.log(`[watcher] "${title}" (pending) → failed (archivo eliminado)`);
     } else {
       // active u otro → soft-delete, ya no debe mostrarse
       await query(

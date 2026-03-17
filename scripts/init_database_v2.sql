@@ -121,7 +121,7 @@ CREATE TABLE content (
     -- Archivo físico
     file_path VARCHAR(1000) NOT NULL,
     file_size BIGINT NOT NULL,
-    file_hash VARCHAR(64) NOT NULL UNIQUE,
+    file_hash VARCHAR(64) NOT NULL,
     mime_type VARCHAR(100),
     
     -- Metadatos multimedia
@@ -170,7 +170,9 @@ CREATE TABLE content (
 CREATE INDEX idx_content_category ON content(category_id);
 CREATE INDEX idx_content_type ON content(type);
 CREATE INDEX idx_content_status ON content(status) WHERE deleted_at IS NULL;
-CREATE INDEX idx_content_hash ON content(file_hash);
+-- Índice único parcial: solo filas vivas (deleted_at IS NULL) compiten por hash.
+-- Permite re-subir archivos cuyo registro fue soft-deleted o rechazado.
+CREATE UNIQUE INDEX content_file_hash_unique ON content(file_hash) WHERE deleted_at IS NULL;
 CREATE INDEX idx_content_etag ON content(etag) WHERE etag IS NOT NULL;
 CREATE INDEX idx_content_priority ON content(priority);
 CREATE INDEX idx_content_created ON content(created_at DESC);
@@ -710,9 +712,12 @@ INSERT INTO categories (name, slug, description, color, display_order) VALUES
     ('Historia', 'historia', 'Historia y geografía', '#8B5CF6', 4),
     ('Inglés', 'ingles', 'Idioma inglés', '#EC4899', 5);
 
--- Usuario administrador (contraseña configurada en .env)
+-- Usuarios de desarrollo
+-- admin → admin123 | docente → teacher123
+-- pgcrypto genera el hash en tiempo de ejecución (sin credenciales hardcodeadas en el repo)
 INSERT INTO users (username, email, password_hash, full_name, role) VALUES
-    ('admin', 'admin@cdn.local', '$2b$10$UrkYl65IuqZQhVosNm3FT.kJGJMgjDG/NTf9Dvty.p/MY72C6zunu', 'Administrador Sistema', 'superadmin');
+    ('admin',   'admin@cdn.local',   crypt('admin123',   gen_salt('bf')), 'Administrador Sistema', 'superadmin'),
+    ('docente', 'docente@cdn.local', crypt('teacher123', gen_salt('bf')), 'Docente Demo',          'teacher');
 
 -- Tags comunes
 INSERT INTO tags (name, slug) VALUES
