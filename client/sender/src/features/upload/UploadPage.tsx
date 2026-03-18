@@ -1,23 +1,21 @@
 import { useState, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
-import { useForm, Controller } from 'react-hook-form'
+import { useForm } from 'react-hook-form'
 import { z } from 'zod'
 import { zodResolver } from '@hookform/resolvers/zod'
 import { useNavigate } from 'react-router-dom'
 import { useQueryClient } from '@tanstack/react-query'
 import {
   UploadCloud, FileVideo, FileText, Music, Image,
-  X, CheckCircle2, AlertCircle, Loader2,
-  ChevronDown, File,
+  X, CheckCircle2, AlertCircle, Loader2, File,
 } from 'lucide-react'
-import { useCategories } from '../../hooks/queries'
 import { formatBytes } from '../../utils/format'
 
 // ── Schema ────────────────────────────────────────────────────
 const schema = z.object({
   title:       z.string().min(3, 'El título debe tener al menos 3 caracteres'),
   description: z.string().max(500, 'Máximo 500 caracteres').optional(),
-  category_id: z.string().min(1, 'Selecciona una categoría'),
+  // category_id removido — el sistema de clasificación automática asigna la categoría
 })
 type FormValues = z.infer<typeof schema>
 
@@ -131,7 +129,7 @@ function uploadWithProgress(
     fd.append('file', file)
     fd.append('title',       fields.title)
     fd.append('description', fields.description ?? '')
-    fd.append('category_id', fields.category_id)
+    // category_id removido — el sistema clasificará automáticamente el contenido
 
     const xhr = new XMLHttpRequest()
     xhr.open('POST', '/api/upload')
@@ -163,7 +161,6 @@ function uploadWithProgress(
 export default function UploadPage() {
   const navigate    = useNavigate()
   const qc          = useQueryClient()
-  const { data: categories = [], isLoading: loadingCats } = useCategories()
 
   const [file,     setFile]     = useState<File | null>(null)
   const [progress, setProgress] = useState(0)
@@ -171,16 +168,12 @@ export default function UploadPage() {
   const [errMsg,   setErrMsg]   = useState('')
 
   const {
-    register, handleSubmit, control, reset,
+    register, handleSubmit, reset,
     formState: { errors, isValid },
   } = useForm<FormValues>({
     resolver: zodResolver(schema),
     mode: 'onChange',
   })
-
-  // Build hierarchical structure for dropdown
-  const rootCats = categories.filter(c => c.parent_id === null)
-  const subCats  = (parentId: string) => categories.filter(c => c.parent_id === parentId)
 
   const onDrop = useCallback((accepted: File[]) => {
     if (accepted[0]) { setFile(accepted[0]); setErrMsg('') }
@@ -294,7 +287,10 @@ export default function UploadPage() {
       <div className="card p-6 space-y-5">
         <div className="border-b border-slate-100 pb-4">
           <p className="text-sm font-semibold text-slate-800">Información del contenido</p>
-          <p className="text-xs text-slate-500 mt-0.5">Completa los datos para que el equipo pueda revisarlo correctamente.</p>
+          <p className="text-xs text-slate-500 mt-0.5">
+            Completa los datos para que el equipo pueda revisarlo correctamente.
+            La categoría se asignará automáticamente usando inteligencia artificial.
+          </p>
         </div>
 
         {/* Title */}
@@ -326,51 +322,6 @@ export default function UploadPage() {
           {errors.description && (
             <p className="flex items-center gap-1.5 text-xs text-red-600 mt-1.5">
               <AlertCircle size={12} /> {errors.description.message}
-            </p>
-          )}
-        </div>
-
-        {/* Category — hierarchical optgroup */}
-        <div>
-          <label className="label">Categoría <span className="text-red-500">*</span></label>
-          <div className="relative">
-            <Controller
-              name="category_id"
-              control={control}
-              defaultValue=""
-              render={({ field }) => (
-                <select
-                  {...field}
-                  disabled={loadingCats}
-                  className={`input appearance-none pr-9 ${errors.category_id ? 'border-red-400' : ''} ${loadingCats ? 'opacity-50' : ''}`}
-                >
-                  <option value="">
-                    {loadingCats ? 'Cargando categorías...' : 'Seleccionar categoría'}
-                  </option>
-                  {rootCats.map(root => {
-                    const children = subCats(root.id)
-                    if (children.length === 0) {
-                      // Root category without children — selectable
-                      return (
-                        <option key={root.id} value={root.id}>{root.name}</option>
-                      )
-                    }
-                    return (
-                      <optgroup key={root.id} label={root.name}>
-                        {children.map(child => (
-                          <option key={child.id} value={child.id}>{child.name}</option>
-                        ))}
-                      </optgroup>
-                    )
-                  })}
-                </select>
-              )}
-            />
-            <ChevronDown size={15} className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          </div>
-          {errors.category_id && (
-            <p className="flex items-center gap-1.5 text-xs text-red-600 mt-1.5">
-              <AlertCircle size={12} /> {errors.category_id.message}
             </p>
           )}
         </div>

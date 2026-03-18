@@ -3,6 +3,7 @@ config/settings.py — Configuración Unificada Multi-plataforma
 GTR-PUCP CDN Educativa Offline
 
 Cambiar de plataforma = cambiar AI_PLATFORM en el .env activo:
+  AI_PLATFORM=laptop          → Desarrollo en laptop/PC (sin GPU CUDA)
   AI_PLATFORM=orin_nano_8gb   → Fase 1 (Jetson Orin Nano 8GB)
   AI_PLATFORM=orin_nx_16gb    → Fase 2 (Jetson Orin NX 16GB)   ← plan original
 """
@@ -10,10 +11,14 @@ import os
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Cargar .env desde la raíz del ai_engine/
-_env_path = Path(__file__).parent.parent / ".env"
-if _env_path.exists():
-    load_dotenv(_env_path)
+# Cargar .env — primero el de la raíz del proyecto, luego el de ai_engine/
+# (el de raíz tiene AI_PLATFORM=laptop para desarrollo)
+_root_env = Path(__file__).parent.parent.parent / ".env"
+if _root_env.exists():
+    load_dotenv(_root_env)
+_ai_env = Path(__file__).parent.parent / ".env"
+if _ai_env.exists():
+    load_dotenv(_ai_env, override=False)  # no sobreescribir lo que ya cargó root
 
 PLATFORM = os.getenv("AI_PLATFORM", "orin_nx_16gb")
 
@@ -21,6 +26,25 @@ PLATFORM = os.getenv("AI_PLATFORM", "orin_nx_16gb")
 # Parámetros por plataforma
 # ---------------------------------------------------------------------------
 _CONFIGS: dict = {
+    # ─── Desarrollo en laptop / PC (sin GPU CUDA) ─────────────────────────
+    "laptop": {
+        "LLM_BACKEND":       "hf",
+        "DRAFT_MODEL_DIR":   os.getenv("DRAFT_MODEL_DIR", ""),
+        "TARGET_MODEL_DIR":  os.getenv("TARGET_MODEL_DIR",
+                                       "/mnt/ssd/models/hf_models/Phi-3.5-mini-instruct"),
+        "SPECULATIVE":        False,
+        "SPECULATIVE_GAMMA":  0,
+        "MAX_CONTEXT":        2048,
+        "MAX_GEN":            1024,
+        "EMBED_DEVICE":      "cpu",   # no CUDA en laptop
+        "HYDE":               False,  # HyDE lento sin GPU
+        "CROSS_ENCODER":      False,  # reranker lento en CPU
+        "TOP_K":              30,
+        "TOP_K_FINAL":        15,     # hasta 15 resultados en búsqueda
+        "CHROMA_MAX":         50_000,
+        "INGESTION_MODE":    "realtime",
+        "THERMAL_PROFILE":   "laptop",
+    },
     "orin_nano_8gb": {
         # LLM
         "LLM_BACKEND":       "tensorrt_llm",

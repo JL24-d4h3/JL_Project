@@ -24,7 +24,7 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
   const { title, description, category_id, is_featured } = req.body;
 
   if (!title) throw new AppError('Title is required', 400);
-  if (!category_id) throw new AppError('Category ID is required', 400);
+  // category_id ahora es opcional — el sistema de clasificación automática asigna categoría basada en el contenido
 
   const file = req.file;
   const userId = req.user!.id;
@@ -64,9 +64,12 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
 
     // 2b. Limpiar registros antiguos rejected/failed con el mismo hash
     // para que el INSERT no viole la constraint UNIQUE en file_hash.
+    // También liberar el slug agregándole timestamp para permitir reutilización.
     await query(
       `UPDATE content
-       SET deleted_at = NOW(), updated_at = NOW()
+       SET deleted_at = NOW(),
+           slug = slug || '_deleted_' || extract(epoch from NOW())::bigint::text,
+           updated_at = NOW()
        WHERE file_hash = $1
          AND deleted_at IS NULL
          AND status IN ('rejected', 'failed')`,
@@ -116,6 +119,7 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
       .replace(/^-+|-+$/g, '');
 
     // 6. Insertar en DB — file_path apunta a temp/ hasta que se apruebe
+    // category_id es opcional: si no se provee, se asignará NULL y la clasificación automática se encargará
     const result = await query(
       `INSERT INTO content (
         title, slug, description, type, category_id,
@@ -137,7 +141,7 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
         slug,
         description || null,
         contentType,
-        category_id,
+        category_id || null,  // ← ahora puede ser NULL
         relativeTempPath,   // ← archivo queda en temp/ hasta aprobación
         fileSize,
         fileHash,
@@ -156,25 +160,8 @@ export const uploadContent = asyncHandler(async (req: Request, res: Response) =>
     const content = result.rows[0];
     console.log(`✅ Content queued for review: ${content.id}`);
 
-    // Disparar ingesta en el AI Engine de forma asíncrona (fire-and-forget)
-    const aiEngineUrl = process.env.AI_ENGINE_URL || 'http://localhost:8000';
-    (async () => {
-      try {
-        const ingestRes = await fetch(`${aiEngineUrl}/api/ingest`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content_id: content.id }),
-          signal: AbortSignal.timeout(5000),
-        });
-        if (ingestRes.ok) {
-          console.log(`🤖 AI ingest encolado para content_id=${content.id}`);
-        } else {
-          console.warn(`⚠️  AI Engine respondió ${ingestRes.status}`);
-        }
-      } catch (err: any) {
-        console.warn(`⚠️  No se pudo contactar al AI Engine: ${err?.message ?? err}`);
-      }
-    })();
+    // La indexación en el AI Engine se dispara al aprobar (reviewContent),
+    // no aquí, porque el archivo aún está en temp/ y el contenido es pending.
 
     res.status(201).json({
       success: true,
@@ -255,8 +242,13 @@ export const deleteContent = asyncHandler(async (req: Request, res: Response) =>
     throw new AppError('You do not have permission to delete this content', 403);
   }
 
+  // Liberar el slug al eliminar (soft delete) para que pueda reutilizarse
   await query(
-    'UPDATE content SET deleted_at = NOW(), updated_by = $1 WHERE id = $2',
+    `UPDATE content
+     SET deleted_at = NOW(),
+         slug = slug || '_deleted_' || extract(epoch from NOW())::bigint::text,
+         updated_by = $1
+     WHERE id = $2`,
     [userId, id]
   );
 
@@ -462,6 +454,29 @@ export const reviewContent = asyncHandler(async (req: Request, res: Response) =>
      WHERE id = $7`,
     [permanentPath, newTitle, newDescription, newCategoryId, newIsFeatured, userId, id]
   );
+
+  // Invalidar caché de listas de contenido para que aparezca inmediatamente
+  await cacheDelete('content:*');
+
+  // Disparar indexación en el AI Engine ahora que el contenido está activo
+  const aiEngineUrl = process.env.AI_ENGINE_URL || 'http://localhost:8000';
+  (async () => {
+    try {
+      const ingestRes = await fetch(`${aiEngineUrl}/api/ingest`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content_id: id }),
+        signal: AbortSignal.timeout(5000),
+      });
+      if (ingestRes.ok) {
+        console.log(`🤖 AI ingest encolado para content_id=${id}`);
+      } else {
+        console.warn(`⚠️  AI Engine respondió ${ingestRes.status} al indexar ${id}`);
+      }
+    } catch (err: any) {
+      console.warn(`⚠️  No se pudo contactar al AI Engine para indexar: ${err?.message ?? err}`);
+    }
+  })();
 
   return res.json({ success: true, message: `Content ${action === 'curate' ? 'curated and ' : ''}approved.` });
 });

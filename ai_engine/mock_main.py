@@ -23,6 +23,7 @@ logger = logging.getLogger(__name__)
 
 # ── LLM Engine (carga en background al iniciar) ──────────────────────────────
 _llm = None   # instancia de LLMEngine cuando está lista
+_retriever = None  # instancia de HybridRetriever cuando está lista
 
 async def _init_llm():
     global _llm
@@ -35,10 +36,22 @@ async def _init_llm():
     except Exception as exc:
         logger.warning("LLM no disponible, usando respuestas de plantilla: %s", exc)
 
+async def _init_retriever():
+    global _retriever
+    try:
+        from ai_engine.services.hybrid_retriever import retriever
+        await retriever.init()
+        _retriever = retriever
+        count = await retriever.chunk_count()
+        logger.info("✓ Retriever listo — %d chunks indexados en ChromaDB", count)
+    except Exception as exc:
+        logger.warning("Retriever no disponible, usando solo MOCK_DB: %s", exc)
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
-    # Arrancar LLM en background (no bloquea el servidor)
+    # Arrancar retriever y LLM en background (no bloquea el servidor)
+    asyncio.create_task(_init_retriever())
     asyncio.create_task(_init_llm())
     yield
     # Shutdown
@@ -1056,54 +1069,77 @@ _DOMAIN_SETS: list[set] = [
 ]
 
 
-def _search_cdn(query: str) -> list[dict]:
-    """Busca en MOCK_DB: coincidencias directas + relacionadas por dominio temático."""
-    q = query.lower()
+async def _search_cdn(query: str) -> list[dict]:
+    """Busca contenido real indexado en ChromaDB. Retorna [] si no hay resultados."""
+    try:
+        # Acceder directamente al singleton retriever (más robusto que usar _retriever global)
+        from ai_engine.services.hybrid_retriever import retriever
 
-    # Puntuar cada entrada del MOCK_DB
-    scored: list[tuple[int, dict]] = []
-    for entry in MOCK_DB:
-        hits = sum(1 for kw in entry["keywords"] if kw in q)
-        scored.append((hits, entry))
-    scored.sort(key=lambda x: x[0], reverse=True)
+        # Lazy initialization: si no está listo, inicializarlo ahora
+        if not retriever.is_ready:
+            logger.info("Retriever no inicializado, inicializando ahora...")
+            await retriever.init()
+            logger.info("Retriever inicializado: %d chunks", await retriever.chunk_count())
 
-    best_hits = scored[0][0] if scored else 0
-    cards: list[dict] = []
+        chunks = await retriever.search(query, top_k=15)
+        if not chunks:
+            logger.debug("ChromaDB: 0 resultados para '%s'", query[:50])
+            return []
 
-    if best_hits > 0:
-        # Resultados directos
-        for hits, entry in scored:
-            if hits > 0:
-                cards.extend(entry["results"])
+        # Convertir chunks del retriever al formato de tarjetas CDN
+        seen: dict[str, dict] = {}
+        for chunk in chunks:
+            cid = chunk.get("content_id", "")
+            score = chunk.get("score", 0)
+            if cid not in seen or score > seen[cid].get("relevance_score", 0):
+                ctype = chunk.get("content_type", "document")
+                ts = chunk.get("timestamp_start")
+                viewer_suffix = f"?t={ts:.0f}" if ts is not None else ""
+                viewer_base = f"/viewer/{'video' if ctype == 'video' else 'document'}/{cid}"
+                seen[cid] = {
+                    "content_id":      cid,
+                    "content_type":    ctype,
+                    "title":           chunk.get("title", ""),
+                    "snippet":         chunk.get("text", "")[:200],
+                    "thumbnail_url":   f"/storage/thumbnails/{cid}.jpg",
+                    "viewer_url":      viewer_base + viewer_suffix,
+                    "relevance_score": round(score, 4),
+                }
+        cards = sorted(seen.values(), key=lambda c: c["relevance_score"], reverse=True)
 
-        # Determinar dominios del match primario
-        primary_kws: set = set()
-        for hits, entry in scored:
-            if hits == scored[0][0]:
-                primary_kws |= set(entry["keywords"])
-        primary_domains = [d for d in _DOMAIN_SETS if primary_kws & d]
+        # Filtrar resultados irrelevantes usando múltiples criterios:
+        # 1. Umbral mínimo absoluto: 0.75 (nada por debajo se muestra)
+        # 2. Detección de "salto" en scores: si hay un gap > 0.04 entre items, cortar ahí
+        # 3. Límite máximo: 5 items (evitar spam de resultados)
+        if cards:
+            filtered = []
+            prev_score = None
+            for c in cards:
+                score = c["relevance_score"]
+                # Criterio 1: umbral absoluto
+                if score < 0.75:
+                    logger.info("  %s: %.4f ✗ (por debajo de umbral 0.75)", c["title"], score)
+                    continue
+                # Criterio 2: detección de salto
+                if prev_score is not None and (prev_score - score) > 0.04:
+                    logger.info("  %s: %.4f ✗ (salto de %.4f desde anterior)",
+                               c["title"], score, prev_score - score)
+                    break  # Cortar aquí, no añadir más
+                # Criterio 3: límite de items
+                if len(filtered) >= 5:
+                    logger.info("  %s: %.4f ✗ (límite de 5 items)", c["title"], score)
+                    break
+                # Pasa todos los criterios
+                logger.info("  %s: %.4f ✓", c["title"], score)
+                filtered.append(c)
+                prev_score = score
+            cards = filtered
 
-        # Agregar entradas relacionadas (mismo dominio, sin hit directo)
-        for hits, entry in scored:
-            if hits == 0:
-                entry_kws = set(entry["keywords"])
-                if any(entry_kws & d for d in primary_domains):
-                    for card in entry["results"]:
-                        related = {**card, "relevance_score": round(card["relevance_score"] * 0.6, 2), "_related": True}
-                        cards.append(related)
-    else:
-        # Sin match directo: buscar por dominio de la query
-        q_words = set(q.split())
-        query_domains = [d for d in _DOMAIN_SETS if q_words & d or any(kw in q for kw in d)]
-        if query_domains:
-            domain_union = set.union(*query_domains)
-            for _, entry in scored:
-                if set(entry["keywords"]) & domain_union:
-                    for card in entry["results"]:
-                        related = {**card, "relevance_score": round(card["relevance_score"] * 0.5, 2), "_related": True}
-                        cards.append(related)
-
-    return cards
+        logger.info("ChromaDB search: %d chunks → %d cards para '%s'", len(chunks), len(cards), query[:50])
+        return cards
+    except Exception as exc:
+        logger.warning("ChromaDB search falló: %s", exc)
+        return []
 
 
 # ── LENGUAJES / TECNOLOGÍAS detectables ──────────────────────────────────────
@@ -1433,15 +1469,16 @@ def _spell_check(query: str) -> str | None:
 
 @app.post("/api/search")
 async def search(req: SearchRequest):
+    cdn_cards = await _search_cdn(req.query)
     m = _match(req.query)
     spell = _spell_check(req.query)
     return {
         "query": req.query,
         "spell_suggestion": spell,
-        "cdn_results": m["results"],
+        "cdn_results": cdn_cards,
         "ai_overview": {
             "text": m["ai_text"], "level": m["level"],
-            "grounding": {"coverage_score": 0.9 if m["results"] else 0.0, "is_grounded": bool(m["results"])},
+            "grounding": {"coverage_score": 0.9 if cdn_cards else 0.0, "is_grounded": bool(cdn_cards)},
             "language_detected": "es",
         },
         "ui_hints": {"suggested_queries": m["suggestions"]},
@@ -1459,7 +1496,7 @@ async def search_stream(req: SearchRequest):
         logger.info("LLM generando respuesta para: %s", req.query)
 
         async def llm_event_generator():
-            cdn_cards = _search_cdn(req.query)
+            cdn_cards = await _search_cdn(req.query)
             yield f"data: {json.dumps({'type': 'cdn_results', 'data': cdn_cards})}\n\n"
             await asyncio.sleep(0.1)
             try:
@@ -1483,16 +1520,19 @@ async def search_stream(req: SearchRequest):
 
     else:
         # ── MODO PLANTILLA: respuesta pre-escrita (rápida, sin modelo) ────────────
+        # Tarjetas CDN: siempre desde ChromaDB (contenido real indexado)
+        cdn_cards = await _search_cdn(req.query)
+        # Texto AI: desde plantillas mock (hasta que haya LLM)
         m = _match(req.query)
         lines = m["ai_text"].split("\n")
 
         async def template_event_generator():
-            yield f"data: {json.dumps({'type': 'cdn_results', 'data': m['results']})}\n\n"
+            yield f"data: {json.dumps({'type': 'cdn_results', 'data': cdn_cards})}\n\n"
             await asyncio.sleep(0.15)
             for line in lines:
                 yield f"data: {json.dumps({'type': 'token', 'text': line + chr(10)})}\n\n"
                 await asyncio.sleep(0.04)
-            yield f"data: {json.dumps({'type': 'done', 'level': m['level'], 'grounding': {'coverage_score': 0.9 if m['results'] else 0.0}, 'suggestions': m['suggestions'], 'spell_suggestion': spell})}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'level': m['level'], 'grounding': {'coverage_score': 0.9 if cdn_cards else 0.0}, 'suggestions': m['suggestions'], 'spell_suggestion': spell})}\n\n"
 
         return StreamingResponse(
             template_event_generator(),
@@ -1512,4 +1552,18 @@ async def voice_search():
 
 @app.post("/api/ingest")
 async def ingest(body: dict = {}):
-    return {"status": "queued", "job_id": "mock-job-001", "content_id": body.get("content_id")}
+    content_id = body.get("content_id", "")
+    if not content_id:
+        return {"status": "error", "error": "content_id requerido"}
+
+    # Usar el pipeline de ingesta real (extrae texto, genera chunks, indexa en ChromaDB)
+    async def _run():
+        try:
+            from ai_engine.services.ingestion.pipeline import ingest_content
+            result = await ingest_content(content_id)
+            logger.info("[INGEST] content_id=%s completado: %s chunks", content_id, result.get("chunks_added", 0))
+        except Exception as exc:
+            logger.error("[INGEST] content_id=%s falló: %s", content_id, exc)
+
+    asyncio.create_task(_run())
+    return {"status": "queued", "content_id": content_id}

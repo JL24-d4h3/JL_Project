@@ -2,19 +2,25 @@
 services/ingestion/pipeline.py — Pipeline principal de ingesta de contenido al índice vectorial.
 GTR-PUCP CDN Educativa Offline
 
-Flujo completo de ingesta (ver docs/ai-search-engine-plan.md §9):
+Flujo completo de ingesta (actualizado con clasificación automática):
 
   1. Consultar PostgreSQL (CDN backend) → obtener metadata del contenido
   2. Extraer texto según tipo:
        video   → STT con Whisper Small (stt.transcribe_for_ingest)
        pdf/doc → extracción de texto con PyMuPDF / python-docx
        audio   → STT con Whisper Small
+       code    → lectura directa del archivo fuente
        image   → usar title + description (sin extracción)
-  3. Chunkear en 3 niveles jerárquicos (chunker.py)
-  4. Generar embeddings con multilingual-e5-small y persistir en ChromaDB
-  5. Actualizar índice BM25 en memoria
-  6. Generar miniatura si no existe (thumbnail_generator.py)
-  7. Notificar al CDN backend → PATCH /api/content/{id}?indexed=true
+  3. Clasificación automática con IA:
+       → Analizar texto + código con ContentClassifier
+       → Extraer dominio (AI, DB, NET, etc.), área, confianza y tags
+       → Los metadatos se usan para pre-filtrado en búsqueda
+  4. Chunkear en 3 niveles jerárquicos (chunker.py)
+  5. Generar embeddings con multilingual-e5-small y persistir en ChromaDB
+       → Cada chunk incluye metadatos de clasificación automática
+  6. Actualizar índice BM25 en memoria
+  7. Generar miniatura si no existe (thumbnail_generator.py)
+  8. Notificar al CDN backend → PATCH /api/content/{id}?indexed=true
 
 La función pública es `ingest_content(content_id)`.
 """
@@ -33,6 +39,7 @@ from ai_engine.services.ingestion.chunker import (
 )
 from ai_engine.services.ingestion.pdf_extractor import extract_text
 from ai_engine.services.ingestion.thumbnail_generator import generate_thumbnail
+from ai_engine.services.classifier import classify_content
 
 logger = logging.getLogger(__name__)
 
@@ -107,36 +114,74 @@ async def _run_pipeline(content_id: str) -> dict:
 
     # ── 2. Extraer texto / transcripción ──────────────────────────────────────
     chunks: list[TextChunk] = []
+    extracted_text: str = ""
+    extracted_code: str = ""
 
     if content_type == "video":
         chunks = await _extract_video(file_path, title, description)
+        # Para clasificación, extraer texto de los chunks
+        extracted_text = "\n".join(c.text for c in chunks)
     elif content_type == "audio":
         chunks = await _extract_audio(file_path, title, description)
+        extracted_text = "\n".join(c.text for c in chunks)
     elif content_type in ("pdf", "document"):
         chunks = await _extract_document(file_path, title, description)
+        extracted_text = "\n".join(c.text for c in chunks)
+    elif content_type == "code":
+        chunks = await _extract_code(file_path, title, description)
+        # Para código, separar texto descriptivo de código fuente
+        extracted_text = f"{title}\n{description}"
+        extracted_code = "\n".join(c.text for c in chunks)
     elif content_type == "image":
         # Imágenes: solo indexar title + description
         combined = f"{title}. {description}".strip()
         if combined:
             chunks = chunk_text(combined, source_type="description")
+        extracted_text = combined
     else:
         logger.warning("[INGEST] Tipo desconocido '%s' — indexando solo metadata", content_type)
         combined = f"{title}. {description}".strip()
         if combined:
             chunks = chunk_text(combined, source_type="description")
+        extracted_text = combined
 
     logger.info("[INGEST] %d chunks generados para %s", len(chunks), content_id)
 
-    # ── 3. Persistir chunks en ChromaDB ───────────────────────────────────────
+    # ── 3. Clasificación automática de contenido ─────────────────────────────
+    classification = {}
+    if extracted_text or extracted_code:
+        try:
+            classification = classify_content(
+                text=extracted_text[:5000],  # Limitar para performance
+                code=extracted_code[:5000] if extracted_code else None,
+                title=title,
+                description=description,
+            )
+            logger.info(
+                "[INGEST] Clasificación: domain=%s, area=%s, confidence=%.2f",
+                classification.get("domain", "OTHER"),
+                classification.get("area", "unknown"),
+                classification.get("confidence", 0.0),
+            )
+        except Exception as exc:
+            logger.warning("[INGEST] Error en clasificación: %s", exc)
+            classification = {
+                "domain": "OTHER",
+                "area": "unknown",
+                "confidence": 0.0,
+                "tags": [],
+            }
+
+    # ── 4. Persistir chunks en ChromaDB ───────────────────────────────────────
     chunks_added = 0
     if chunks:
-        chunks_added = await _index_chunks(content_id, meta, chunks)
+        chunks_added = await _index_chunks(content_id, meta, chunks, classification)
 
-    # ── 4. Actualizar índice BM25 ─────────────────────────────────────────────
+    # ── 5. Actualizar índice BM25 ─────────────────────────────────────────────
     if chunks:
         await _update_bm25([c.text for c in chunks])
 
-    # ── 5. Generar miniatura si no existe ─────────────────────────────────────
+    # ── 6. Generar miniatura si no existe ─────────────────────────────────────
     if not thumbnail_url:
         thumbnail_url = await generate_thumbnail(
             content_id=content_id,
@@ -145,7 +190,7 @@ async def _run_pipeline(content_id: str) -> dict:
             category=category,
         )
 
-    # ── 6. Notificar al CDN backend que el contenido fue indexado ─────────────
+    # ── 7. Notificar al CDN backend que el contenido fue indexado ─────────────
     await _notify_indexed(content_id, thumbnail_url=thumbnail_url)
 
     return {
@@ -210,6 +255,25 @@ async def _extract_document(file_path: str, title: str, description: str) -> lis
     return chunk_text(full_text, source_type="pdf_text")
 
 
+async def _extract_code(file_path: str, title: str, description: str) -> list[TextChunk]:
+    """Lee el archivo de código fuente como texto plano y genera chunks."""
+    if not file_path or not Path(file_path).exists():
+        logger.warning("[INGEST] Archivo de código no encontrado: %s", file_path)
+        return chunk_text(f"{title}. {description}".strip(), source_type="description")
+
+    try:
+        code_text = Path(file_path).read_text(encoding="utf-8", errors="replace")
+    except Exception as exc:
+        logger.error("[INGEST] Error leyendo código %s: %s", file_path, exc)
+        return chunk_text(f"{title}. {description}".strip(), source_type="description")
+
+    if not code_text.strip():
+        return chunk_text(f"{title}. {description}".strip(), source_type="description")
+
+    full_text = f"{title}\n\n{description}\n\n{code_text}" if title else code_text
+    return chunk_text(full_text, source_type="code")
+
+
 # ---------------------------------------------------------------------------
 # ChromaDB — indexación de chunks
 # ---------------------------------------------------------------------------
@@ -218,10 +282,12 @@ async def _index_chunks(
     content_id: str,
     meta: dict,
     chunks: list[TextChunk],
+    classification: dict,
 ) -> int:
     """
     Pide al hybrid_retriever que indexe los chunks en ChromaDB.
-    Cada chunk se almacena con su metadata para permitir deep links.
+    Cada chunk se almacena con su metadata para permitir deep links
+    y con metadatos de clasificación automática para pre-filtrado.
 
     Returns:
         Número de chunks efectivamente añadidos.
@@ -255,6 +321,11 @@ async def _index_chunks(
             "title":         meta.get("title", "")[:200],
             "category":      meta.get("category", ""),
             "content_type":  meta.get("type", ""),
+            # Metadatos de clasificación automática
+            "auto_domain":      classification.get("domain", "OTHER"),
+            "auto_area":        classification.get("area", "unknown"),
+            "auto_confidence":  classification.get("confidence", 0.0),
+            "auto_tags":        ",".join(classification.get("tags", [])[:10]),
         }
         if chunk.timestamp_start is not None:
             meta_entry["timestamp_start"] = chunk.timestamp_start
@@ -286,6 +357,8 @@ async def _fetch_content_metadata(content_id: str) -> Optional[dict]:
     """
     Llama a GET /api/content/{content_id} del CDN backend para obtener la metadata.
     Retorna None si el contenido no existe o hay un error de red.
+
+    El backend retorna: { success: true, data: { id, title, file_path, type, ... } }
     """
     import httpx
     url = f"{settings.CDN_BACKEND_URL}/api/content/{content_id}"
@@ -293,9 +366,9 @@ async def _fetch_content_metadata(content_id: str) -> Optional[dict]:
         async with httpx.AsyncClient(timeout=10.0) as client:
             resp = await client.get(url)
         if resp.status_code == 200:
-            data = resp.json()
-            # El backend puede retornar { content: {...} } o directamente {...}
-            return data.get("content", data)
+            body = resp.json()
+            # El backend retorna { success, data: {...} }
+            return body.get("data", body.get("content", body))
         logger.warning(
             "[INGEST] CDN backend retornó %d para content_id=%s",
             resp.status_code, content_id
@@ -332,24 +405,33 @@ async def _notify_indexed(content_id: str, thumbnail_url: Optional[str] = None) 
 def _resolve_file_path(meta: dict) -> str:
     """
     Convierte la metadata del contenido en una ruta absoluta al archivo.
-    Busca en STORAGE_PATH según el tipo de contenido.
+
+    El backend almacena file_path como ruta relativa al STORAGE_PATH,
+    p.ej. "code/abc123.py", "videos/abc123.mp4", "documents/abc123.pdf".
     """
-    storage  = Path(settings.STORAGE_PATH)
+    storage = Path(settings.STORAGE_PATH)
+
+    # Preferir file_path del backend (ya es ruta relativa correcta)
+    file_path = meta.get("file_path", "")
+    if file_path:
+        full = storage / file_path
+        if full.exists():
+            return str(full)
+        logger.warning("[INGEST] file_path '%s' no encontrado en disco", full)
+
+    # Fallback: construir desde file_name + tipo
     file_name = meta.get("file_name") or meta.get("filename") or ""
-    content_type = meta.get("type", "document").lower()
-
-    if content_type == "video":
-        subdir = "videos"
-    elif content_type == "audio":
-        subdir = "audio"
-    elif content_type in ("pdf", "document"):
-        subdir = "documents"
-    elif content_type == "image":
-        subdir = "images"
-    else:
-        subdir = "documents"
-
     if not file_name:
         return ""
 
+    content_type = meta.get("type", "document").lower()
+    subdir_map = {
+        "video": "videos",
+        "audio": "audio",
+        "pdf": "documents",
+        "document": "documents",
+        "image": "images",
+        "code": "code",
+    }
+    subdir = subdir_map.get(content_type, "documents")
     return str(storage / subdir / file_name)

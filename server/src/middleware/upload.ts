@@ -146,20 +146,23 @@ export function getContentTypeFromMime(
     '.proto', '.r', '.m', '.scala', '.lua', '.pl', '.ex', '.exs',
   ];
 
-  // Por extensión cuando MIME no es informativo
-  if (mimeType === 'application/octet-stream' || mimeType.startsWith('text/')) {
-    if (['.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv'].includes(ext)) return 'video';
-    if (['.mp3', '.wav', '.m4a', '.flac', '.aac', '.opus'].includes(ext)) return 'audio';
-    if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.tiff'].includes(ext)) return 'image';
-    if (ext === '.pdf') return 'pdf';
-    if (codeExtensions.includes(ext)) return 'code';
-    return 'document';
-  }
+  // La extensión siempre gana para archivos de código, independientemente del MIME type
+  // (application/json, text/x-python, application/octet-stream, etc.)
+  if (codeExtensions.includes(ext)) return 'code';
 
   if (ALLOWED_MIME_TYPES.video.includes(mimeType)) return 'video';
   if (ALLOWED_MIME_TYPES.audio.includes(mimeType)) return 'audio';
   if (ALLOWED_MIME_TYPES.image.includes(mimeType)) return 'image';
   if (mimeType === 'application/pdf') return 'pdf';
+
+  // Para MIME types no informativos, revisar extensión
+  if (mimeType === 'application/octet-stream' || mimeType.startsWith('text/')) {
+    if (['.mp4', '.webm', '.ogg', '.mov', '.avi', '.mkv'].includes(ext)) return 'video';
+    if (['.mp3', '.wav', '.m4a', '.flac', '.aac', '.opus'].includes(ext)) return 'audio';
+    if (['.jpg', '.jpeg', '.png', '.gif', '.webp', '.svg', '.bmp', '.tiff'].includes(ext)) return 'image';
+    if (ext === '.pdf') return 'pdf';
+  }
+
   return 'document';
 }
 

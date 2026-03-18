@@ -1,5 +1,8 @@
 {
-  "python.defaultInterpreterPath": "${workspaceFolder}/ai_env/bin/python",
-  "python.terminal.activateEnvironment": true,
-  "chat.planAgent.defaultModel": "Claude Sonnet 4.6 (claude-code)"
+    "python.defaultInterpreterPath": "${workspaceFolder}/ai_env/bin/python",
+    "python.terminal.activateEnvironment": true,
+    "chat.planAgent.defaultModel": "Claude Sonnet 4.6 (claude-code)",
+    "inlineChat.defaultModel": "Claude Sonnet 4.6 (claude-code)",
+    "chat.defaultModel": "Claude Sonnet 4.6 (claude-code)",
+    "claude.chat.model": "Claude Sonnet 4.6 (claude-code)"
 }

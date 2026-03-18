@@ -1,16 +1,3 @@
-# docker-compose.dev.yml — desarrollo local
-#
-# En esta máquina tanto PostgreSQL 16 como Redis 7 están instalados
-# nativamente (paquetes del sistema), por lo que este archivo no se
-# usa en el entorno de desarrollo local.
-#
-# Servicios disponibles directamente:
-#   PostgreSQL:  localhost:5432  |  db: cdn_dev  |  user: cdn_user  |  pass: cdn_pass
-#   Redis:       localhost:6379
-#
-# Este archivo se mantiene como referencia para despliegue en contenedores
-# (p. ej. Jetson o servidor de producción).
-
 services:
   postgres:
     image: postgres:16
@@ -22,13 +9,11 @@ services:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-    restart: unless-stopped
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
-    restart: unless-stopped
 
 volumes:
   pgdata:

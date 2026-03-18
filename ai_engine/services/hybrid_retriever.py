@@ -1,23 +1,31 @@
 """
-services/hybrid_retriever.py — Retrieval híbrido: BM25 + ChromaDB + Cross-Encoder.
+services/hybrid_retriever.py — Retrieval híbrido: BM25 + ChromaDB + Cross-Encoder + Pre-filtrado por Clasificación.
 GTR-PUCP CDN Educativa Offline
 
 Pipeline de búsqueda (read):
-  embed(query) + HyDE → ChromaDB coseno → BM25 → RRF → Cross-Encoder → top-K final
+  classify_query(query) → determinar dominio → filtro WHERE en ChromaDB
+  → embed(query) + HyDE → ChromaDB coseno → BM25 → RRF → Cross-Encoder → top-K final
 
 Pipeline de escritura (ingesta):
-  add_chunks()            → embed + upsert en ChromaDB
+  add_chunks()            → embed + upsert en ChromaDB con metadatos de clasificación
   delete_by_content_id()  → borrar chunks anteriores antes de reindexar
   update_bm25()           → reconstruir índice BM25 en memoria
 
-Ver docs/ai-search-engine-plan.md §10 para el diseño completo.
+Ver docs/ai-search-engine-plan.md §10 y docs/auto-classification-proposal.md para el diseño completo.
 """
 from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
 
+# Pre-importar transformers para evitar problemas de lazy loading en async context
+try:
+    from transformers import AutoConfig
+except ImportError:
+    pass
+
 from ai_engine.config import settings
+from ai_engine.services.classifier import classify_query
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +34,10 @@ _COLLECTION_NAME = "cdn_chunks"
 
 class HybridRetriever:
     """
-    Pipeline: embed(query) + HyDE → ChromaDB + BM25 → RRF → Cross-Encoder → top-K final
+    Pipeline: classify_query → filtro WHERE → embed(query) + HyDE → ChromaDB + BM25 → RRF → Cross-Encoder → top-K final
+
+    El clasificador de queries permite pre-filtrar por dominio (AI, DB, NET, etc.) antes de la búsqueda vectorial,
+    eliminando contenido irrelevante y mejorando la precisión sin cambiar el modelo de embeddings.
     """
 
     def __init__(self):
@@ -78,7 +89,9 @@ class HybridRetriever:
             )
             logger.info("Embedder '%s' cargado en %s", settings.EMBED_MODEL_NAME, settings.EMBEDDING_DEVICE)
         except Exception as exc:
+            import traceback
             logger.error("Error cargando embedder: %s", exc)
+            logger.error("Traceback completo:\n%s", traceback.format_exc())
             self._embedder = None
 
         if settings.CROSS_ENCODER_ENABLED:
@@ -153,6 +166,19 @@ class HybridRetriever:
     def _search_sync(self, query: str, k_fetch: int, k_final: int) -> list[dict]:
         """Pipeline síncrono de búsqueda ejecutado en un executor."""
 
+        # ── 0. Clasificar la query para pre-filtrado ──────────────────────────
+        query_class = classify_query(query)
+        where_filter = None
+
+        # Aplicar filtro solo si la confianza es >= 0.6
+        if query_class["confidence"] >= 0.6 and query_class["domain"]:
+            where_filter = {"auto_domain": query_class["domain"]}
+            logger.debug(
+                "[SEARCH] Pre-filtrado por clasificación: domain=%s (conf=%.2f)",
+                query_class["domain"],
+                query_class["confidence"],
+            )
+
         # ── 1. Embedding de la query ──────────────────────────────────────────
         # multilingual-e5 requiere prefijo "query: " para consultas
         query_emb = self._embedder.encode(
@@ -160,10 +186,11 @@ class HybridRetriever:
             normalize_embeddings=True,
         ).tolist()
 
-        # ── 2. Búsqueda vectorial en ChromaDB ─────────────────────────────────
+        # ── 2. Búsqueda vectorial en ChromaDB CON FILTRO ──────────────────────
         chroma_results = self._collection.query(
             query_embeddings=[query_emb],
             n_results=min(k_fetch, max(self._collection.count(), 1)),
+            where=where_filter,  # ← NUEVO: pre-filtrado por dominio
             include=["documents", "metadatas", "distances"],
         )
         chroma_docs  = (chroma_results.get("documents")  or [[]])[0]
@@ -350,121 +377,3 @@ class HybridRetriever:
 
 retriever = HybridRetriever()
 
-
-class HybridRetriever:
-    """
-    Pipeline: embed(query) + HyDE → ChromaDB + BM25 → RRF → Cross-Encoder → top-K final
-    """
-
-    def __init__(self):
-        self.is_ready   = False
-        self._chroma    = None
-        self._embedder  = None
-        self._bm25      = None
-        self._reranker  = None
-
-    async def init(self):
-        """Carga ChromaDB, embedder (GPU), BM25 index y cross-encoder."""
-        logger.info(
-            "Inicializando retriever — ChromaDB: %s | embedder device: %s",
-            settings.CHROMADB_PATH,
-            settings.EMBEDDING_DEVICE,
-        )
-        # TODO: implementar carga real
-        # import chromadb
-        # from sentence_transformers import SentenceTransformer, CrossEncoder
-        # self._chroma   = chromadb.PersistentClient(path=settings.CHROMADB_PATH)
-        # self._embedder = SentenceTransformer(settings.EMBED_MODEL_NAME,
-        #                                       cache_folder=settings.EMBED_MODEL_DIR,
-        #                                       device=settings.EMBEDDING_DEVICE)
-        # if settings.CROSS_ENCODER_ENABLED:
-        #     self._reranker = CrossEncoder(settings.CROSS_ENCODER_MODEL, max_length=512)
-        self.is_ready = True
-        logger.info("Retriever inicializado (stub)")
-
-    async def chunk_count(self) -> int:
-        """Retorna el número de chunks indexados en ChromaDB."""
-        if not self.is_ready or self._chroma is None:
-            return 0
-        # TODO: return self._chroma.get_collection("cdn_chunks").count()
-        return 0
-
-    async def search(self, query: str, top_k: int | None = None) -> list:
-        """
-        Ejecuta el pipeline completo y retorna top-K chunks rerankeados.
-        """
-        if not self.is_ready:
-            raise RuntimeError("Retriever no inicializado")
-        k = top_k or settings.TOP_K_FINAL
-        # TODO: implementar búsqueda real (embed → ChormDB + BM25 → RRF → cross-encoder)
-        return []
-
-    # ── Métodos de escritura (usados por el pipeline de ingesta) ──────────────
-
-    async def add_chunks(
-        self,
-        ids:       list[str],
-        texts:     list[str],
-        metadatas: list[dict],
-    ) -> int:
-        """
-        Genera embeddings e inserta chunks en ChromaDB.
-
-        Args:
-            ids:       Lista de IDs únicos para cada chunk  ({content_id}_{chunk_index})
-            texts:     Lista de textos a embeber e indexar
-            metadatas: Lista de dicts con metadata por chunk
-
-        Returns:
-            Número de chunks añadidos.
-        """
-        if not self.is_ready:
-            logger.error("add_chunks: retriever no inicializado")
-            return 0
-
-        if not ids:
-            return 0
-
-        # TODO: implementar embedding real
-        # embeddings = self._embedder.encode(
-        #     [f"passage: {t}" for t in texts],
-        #     batch_size=32,
-        #     normalize_embeddings=True,
-        #     show_progress_bar=False,
-        # )
-        # collection = self._chroma.get_or_create_collection(
-        #     "cdn_chunks",
-        #     metadata={"hnsw:space": "cosine"},
-        # )
-        # collection.add(ids=ids, embeddings=embeddings.tolist(), documents=texts, metadatas=metadatas)
-
-        logger.info("add_chunks (stub): %d chunks para content_id=%s", len(ids),
-                    metadatas[0].get("content_id", "?") if metadatas else "?")
-        return len(ids)  # stub: reportar como añadidos
-
-    async def delete_by_content_id(self, content_id: str) -> None:
-        """
-        Elimina todos los chunks de un content_id del índice ChromaDB.
-        Llamado antes de reindexar para evitar duplicados.
-        """
-        if not self.is_ready:
-            return
-        # TODO: implementar
-        # collection = self._chroma.get_or_create_collection("cdn_chunks")
-        # collection.delete(where={"content_id": content_id})
-        logger.debug("delete_by_content_id (stub): %s", content_id)
-
-    async def update_bm25(self, new_texts: list[str]) -> None:
-        """
-        Agrega nuevos textos al índice BM25 en memoria.
-        En producción se reconstruye el índice completo periódicamente.
-        """
-        if not self.is_ready or not new_texts:
-            return
-        # TODO: implementar con rank_bm25.BM25Okapi
-        # self._bm25_corpus.extend(new_texts)
-        # self._bm25 = rank_bm25.BM25Okapi([t.lower().split() for t in self._bm25_corpus])
-        logger.debug("update_bm25 (stub): +%d textos", len(new_texts))
-
-
-retriever = HybridRetriever()
