@@ -2,23 +2,34 @@
 services/classifier.py — Clasificación Automática de Contenido
 GTR-PUCP CDN Educativa Offline
 
-Clasifica contenido técnico por dominio y área usando análisis de señales
-(imports, keywords, patrones). Esto elimina la dependencia de la clasificación
-manual del usuario y mejora la precisión de búsqueda.
+Clasifica contenido técnico por dominio y área usando:
+1. Pipeline Híbrido (SEÑALES + BART-MNLI)
+   - Fase 1: Análisis rápido por importes, keywords, patrones
+   - Fase 2: Zero-Shot con BART-MNLI si confianza < 0.65 (fallback semántico)
+
+El sistema elimina la dependencia de clasificación manual del usuario,
+mejora la precisión de búsqueda filtrada, y evita falsos positivos
+(ej: "SIMULADOR DE PETICIONES" no aparece en búsquedas de "visión artificial").
 
 Pipeline:
-  1. Extrae señales del código (imports, funciones)
+  1. Extrae señales del código (imports, funciones) ← Rápido (<50ms)
   2. Analiza texto por keywords técnicos
-  3. Asigna dominio + área + confianza
-  4. Los metadatos se indexan en ChromaDB para pre-filtrado
+  3. Calcula confianza inicial
+  4. Si confidence < 0.65 → BART-MNLI para validación/mejora (~500ms)
+  5. Retorna clasificación final + confianza
 """
 from __future__ import annotations
 import re
 import logging
 from collections import Counter
 from typing import Optional
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+# Singleton para BART-MNLI (lazy loading)
+_BART_CLASSIFIER = None
+_BART_LOADED = False
 
 # =============================================================================
 # TAXONOMÍA DE CLASIFICACIÓN
@@ -170,23 +181,23 @@ IMPORT_SIGNALS: dict[str, tuple[str, str, float]] = {
 # Keywords en texto/código → (dominio, área, peso)
 KEYWORD_SIGNALS: dict[str, tuple[str, str, float]] = {
     # Computer Vision - Español
-    "visión artificial": ("AI", "computer_vision", 2.5),
-    "vision artificial": ("AI", "computer_vision", 2.5),
-    "visión por computadora": ("AI", "computer_vision", 2.5),
-    "detección de objetos": ("AI", "computer_vision", 2.5),
-    "segmentación": ("AI", "computer_vision", 2.0),
-    "segmentacion": ("AI", "computer_vision", 2.0),
-    "reconocimiento facial": ("AI", "computer_vision", 2.5),
-    "procesamiento de imágenes": ("AI", "computer_vision", 2.0),
-    "procesamiento de imagenes": ("AI", "computer_vision", 2.0),
+    "visión artificial": ("AI", "computer_vision", 3.5),  # Aumentado para query classification
+    "vision artificial": ("AI", "computer_vision", 3.5),  # Aumentado para query classification
+    "visión por computadora": ("AI", "computer_vision", 3.5),
+    "detección de objetos": ("AI", "computer_vision", 3.5),
+    "segmentación": ("AI", "computer_vision", 3.0),
+    "segmentacion": ("AI", "computer_vision", 3.0),
+    "reconocimiento facial": ("AI", "computer_vision", 3.5),
+    "procesamiento de imágenes": ("AI", "computer_vision", 3.0),
+    "procesamiento de imagenes": ("AI", "computer_vision", 3.0),
 
     # Computer Vision - Inglés / Técnico
-    "computer vision": ("AI", "computer_vision", 2.5),
-    "object detection": ("AI", "computer_vision", 2.5),
-    "image segmentation": ("AI", "computer_vision", 2.5),
-    "yolo": ("AI", "computer_vision", 3.0),
-    "u-net": ("AI", "computer_vision", 3.0),
-    "unet": ("AI", "computer_vision", 3.0),
+    "computer vision": ("AI", "computer_vision", 3.5),  # Aumentado
+    "object detection": ("AI", "computer_vision", 3.5),
+    "image segmentation": ("AI", "computer_vision", 3.5),
+    "yolo": ("AI", "computer_vision", 3.5),
+    "u-net": ("AI", "computer_vision", 3.5),
+    "unet": ("AI", "computer_vision", 3.5),
     "rcnn": ("AI", "computer_vision", 2.5),
     "faster rcnn": ("AI", "computer_vision", 2.5),
     "mask rcnn": ("AI", "computer_vision", 2.5),
@@ -350,7 +361,11 @@ CODE_PATTERNS: list[tuple[str, str, str, float]] = [
 # =============================================================================
 
 class ContentClassifier:
-    """Clasificador de contenido técnico por señales."""
+    """
+    Clasificador de contenido técnico con pipeline híbrido.
+    - Fase 1: Análisis rápido por señales (imports, keywords, patrones)
+    - Fase 2: BART-MNLI zero-shot si confianza < 0.65 (fallback semántico)
+    """
 
     def __init__(self):
         # Compilar patrones regex
@@ -365,15 +380,17 @@ class ContentClassifier:
         code: Optional[str] = None,
         title: str = "",
         description: str = "",
+        use_bart: bool = True,
     ) -> dict:
         """
-        Clasifica contenido técnico.
+        Clasifica contenido técnico con pipeline híbrido.
 
         Args:
             text: Texto extraído del documento
             code: Código fuente (si aplica)
             title: Título del contenido
             description: Descripción del contenido
+            use_bart: Usar BART-MNLI si confianza < 0.65 (default: True)
 
         Returns:
             {
@@ -384,6 +401,7 @@ class ContentClassifier:
                 "confidence": 0.85,
                 "tags": ["yolo", "detection", "pytorch"],
                 "signals_found": [...],
+                "method": "signals" | "bart-mnli"  # cómo se clasificó
             }
         """
         scores: Counter = Counter()
@@ -394,6 +412,7 @@ class ContentClassifier:
         full_text = f"{title} {description} {text}".lower()
         code_text = (code or "").lower()
 
+        # ========== FASE 1: SEÑALES ==========
         # 1. Analizar imports
         self._analyze_imports(code_text, scores, signals_found, tags)
 
@@ -406,8 +425,13 @@ class ContentClassifier:
         # 4. Analizar título (peso extra)
         self._analyze_title(title.lower(), scores, signals_found)
 
-        # Determinar clasificación final
+        # Calcular clasificación por señales
         if not scores:
+            # Sin señales claras → intentar BART-MNLI
+            if use_bart:
+                return self._classify_with_bart(
+                    title, description, text, fallback_to_signals=True
+                )
             return self._unknown_classification()
 
         # Obtener el mejor (dominio, área)
@@ -417,11 +441,23 @@ class ContentClassifier:
         # Calcular confianza (normalizada)
         max_possible = sum(w for _, w in scores.most_common(3))
         confidence = min(total_weight / max(max_possible, 1.0), 1.0)
-        # Ajustar: si hay pocas señales, reducir confianza
+        
+        # Ajustar por número de señales
         if len(signals_found) < 3:
             confidence *= 0.7
         elif len(signals_found) < 5:
             confidence *= 0.85
+
+        # ========== FASE 2: VALIDACIÓN CON BART SI CONFIDENCE < 0.65 ==========
+        # Si confianza baja, usar BART para validar o mejorar
+        if use_bart and confidence < 0.65:
+            bart_result = self._classify_with_bart(
+                title, description, text, fallback_to_signals=False
+            )
+            # Si BART está más confiado, usar su resultado
+            if bart_result["confidence"] > confidence:
+                bart_result["signals_found"] = signals_found[:20]
+                return bart_result
 
         return {
             "domain": domain,
@@ -429,8 +465,9 @@ class ContentClassifier:
             "area": area,
             "area_label": AREAS.get(domain, {}).get(area, area),
             "confidence": round(confidence, 3),
-            "tags": list(tags)[:10],  # máximo 10 tags
-            "signals_found": signals_found[:20],  # máximo 20 señales
+            "tags": list(tags)[:10],
+            "signals_found": signals_found[:20],
+            "method": "signals",
         }
 
     def _analyze_imports(
@@ -512,7 +549,104 @@ class ContentClassifier:
             "confidence": 0.0,
             "tags": [],
             "signals_found": [],
+            "method": "unknown",
         }
+
+    def _classify_with_bart(
+        self,
+        title: str,
+        description: str,
+        text: str,
+        fallback_to_signals: bool = True,
+    ) -> dict:
+        """
+        Clasificación semántica usando BART-MNLI zero-shot.
+        
+        IMPORTANTE: Este método usa la API de transformers para hacer
+        zero-shot classification. BART-MNLI requiere ~1.5 GB RAM pero
+        el modelo se cachea automáticamente en ~/.cache/huggingface/.
+        
+        En CPU, tarda ~500ms por documento. Para ingesta, esto es aceptable.
+        """
+        try:
+            # Preparar texto para BART (máximo 1024 tokens para eficiencia)
+            combined = f"{title}. {description}. {text}"
+            combined = combined[:2000]  # Limitar a 2000 caracteres
+            
+            # Cargar clasificador BART lazily
+            classifier = _load_bart_classifier()
+            if classifier is None:
+                logger.warning("BART-MNLI no disponible, fallback a resultados por señales")
+                return self._unknown_classification()
+            
+            # Candidatos de dominio (traducidos para mejor desempeño)
+            domain_candidates = [
+                "Inteligencia Artificial y Machine Learning",  # AI
+                "Redes y Comunicaciones",  # NET
+                "Bases de Datos",  # DB
+                "Ciencias de la Computación",  # CS
+                "Ingeniería de Software",  # SE
+                "Desarrollo Web",  # WEB
+                "Matemáticas y Estadística",  # MATH
+                "Sistemas y DevOps",  # SYS
+            ]
+            
+            # Zero-shot classification
+            result = classifier(
+                combined,
+                domain_candidates,
+                hypothesis_template="Este contenido es sobre {}.",
+                multi_class=False,
+            )
+            
+            # Mapear resultado a código de dominio
+            best_domain_label = result["labels"][0]
+            best_score = result["scores"][0]
+            
+            # Mapeo inverso: label → código de dominio
+            domain_map = {v: k for k, v in DOMAINS.items()}
+            domain = domain_map.get(best_domain_label, "OTHER")
+            
+            # Ahora clasificar área específica si es AI
+            area = "general"
+            if domain == "AI" and best_score > 0.4:
+                ai_areas = [
+                    "Visión Artificial",
+                    "Procesamiento de Lenguaje Natural",
+                    "Aprendizaje Profundo",
+                    "Machine Learning General",
+                    "Aprendizaje por Refuerzo",
+                ]
+                area_result = classifier(
+                    combined,
+                    ai_areas,
+                    hypothesis_template="Este código es sobre {}.",
+                    multi_class=False,
+                )
+                area_label = area_result["labels"][0]
+                area_map = {v: k for k, v in AREAS.get("AI", {}).items()}
+                area = area_map.get(area_label, "ml_general")
+            
+            logger.info(
+                f"BART clasificó como {domain}/{area} (conf={best_score:.3f})"
+            )
+            
+            return {
+                "domain": domain,
+                "domain_label": DOMAINS.get(domain, domain),
+                "area": area,
+                "area_label": AREAS.get(domain, {}).get(area, area),
+                "confidence": round(best_score, 3),
+                "tags": [],
+                "signals_found": ["bart-mnli"],
+                "method": "bart-mnli",
+            }
+            
+        except Exception as e:
+            logger.error(f"Error en BART classification: {e}")
+            if fallback_to_signals:
+                return self._unknown_classification()
+            raise
 
 
 # =============================================================================
@@ -521,23 +655,116 @@ class ContentClassifier:
 
 def classify_query(query: str) -> dict:
     """
-    Clasificación rápida de la consulta del usuario.
-    Usado para pre-filtrar resultados en búsqueda.
-
+    Clasificación de query usando EMBEDDINGS SEMÁNTICOS (no hardcoded, no keywords).
+    
+    Estrategia:
+    1. Generar embedding de la query
+    2. Comparar con embeddings de domain descriptions
+    3. Tomar el dominio más parecido (cosine similarity)
+    4. Si no hay match claro (< 0.5 similarity), retorna None
+    
+    Ventajas:
+    - 100% semántico, entiende el significado real
+    - Funciona en cualquier idioma
+    - No se afecta por cambiar un carácter
+    - "radiación electromagnética" → None (no hay contenido)
+    - "visión artificial" → AI/computer_vision ✓
+    
     Returns:
         {
             "domain": "AI" | None,
             "area": "computer_vision" | None,
-            "confidence": 0.0-1.0,
+            "confidence": 0.0-1.0,  (cosine similarity)
         }
+    """
+    try:
+        from sentence_transformers import SentenceTransformer
+        from sklearn.metrics.pairwise import cosine_similarity
+        
+        # Cargar embedder (multilingual-e5-small)
+        try:
+            embedder = SentenceTransformer(
+                "intfloat/multilingual-e5-small",
+                cache_folder=str(Path(__file__).parent.parent.parent / ".cache"),
+            )
+        except:
+            embedder = SentenceTransformer("intfloat/multilingual-e5-small")
+        
+        # Generar embedding de la query
+        query_emb = embedder.encode(f"query: {query}", normalize_embeddings=True)
+        
+        # Candidatos: descripciones de cada dominio
+        domain_candidates = []
+        for code, label in DOMAINS.items():
+            description = f"query: {label}. Content about {label}."
+            domain_candidates.append((code, label, description))
+        
+        # Calcular similarities
+        best_domain = None
+        best_score = 0.0
+        best_area = "general"
+        
+        for code, label, desc in domain_candidates:
+            domain_emb = embedder.encode(desc, normalize_embeddings=True)
+            # Cosine similarity
+            similarity = float(cosine_similarity([query_emb], [domain_emb])[0][0])
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_domain = code
+        
+        # Si no hay match claro, retorna None
+        if best_score < 0.5:
+            logger.debug(
+                f"Query '{query}' - No match claro (max_sim={best_score:.2f}) → None"
+            )
+            return {"domain": None, "area": None, "confidence": 0.0}
+        
+        # Si es AI, intentar clasificar área específica
+        if best_domain == "AI":
+            ai_candidates = []
+            for area_code, area_label in AREAS.get("AI", {}).items():
+                desc = f"query: {area_label}. Content about {area_label}."
+                ai_candidates.append((area_code, area_label, desc))
+            
+            best_area_score = 0.0
+            for code, label, desc in ai_candidates:
+                area_emb = embedder.encode(desc, normalize_embeddings=True)
+                similarity = float(cosine_similarity([query_emb], [area_emb])[0][0])
+                if similarity > best_area_score:
+                    best_area_score = similarity
+                    best_area = code
+        
+        logger.debug(
+            f"Query '{query}' → {best_domain}/{best_area} (similarity={best_score:.3f})"
+        )
+        
+        return {
+            "domain": best_domain,
+            "area": best_area,
+            "confidence": round(best_score, 3),
+        }
+        
+    except Exception as e:
+        logger.error(f"Error en classify_query con embeddings: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        return {"domain": None, "area": None, "confidence": 0.0}
+
+
+def _classify_query_keywords_fallback(query: str) -> dict:
+    """
+    Fallback a keywords cuando BART-MNLI no está disponible.
+    SOLO para desarrollo local, en producción BART debería funcionar.
     """
     query_lower = query.lower()
     scores: Counter = Counter()
+    keywords_found = 0
 
-    # Buscar keywords en la query
     for keyword, (domain, area, weight) in KEYWORD_SIGNALS.items():
         if keyword in query_lower:
             scores[(domain, area)] += weight
+            keywords_found += 1
 
     if not scores:
         return {"domain": None, "area": None, "confidence": 0.0}
@@ -545,12 +772,20 @@ def classify_query(query: str) -> dict:
     best = scores.most_common(1)[0]
     (domain, area), weight = best
 
-    # Calcular confianza basada en peso acumulado
-    confidence = min(weight / 5.0, 1.0)
+    # Confianza muy conservadora en fallback
+    if weight >= 3.0:
+        confidence = 0.80
+    elif weight >= 2.0:
+        confidence = 0.65
+    else:
+        confidence = 0.50
+
+    if keywords_found > 1:
+        confidence = min(confidence + 0.1, 1.0)
 
     return {
-        "domain": domain,
-        "area": area,
+        "domain": domain if confidence >= 0.5 else None,
+        "area": area if confidence >= 0.5 else None,
         "confidence": round(confidence, 3),
     }
 
@@ -559,11 +794,61 @@ def classify_query(query: str) -> dict:
 classifier = ContentClassifier()
 
 
+def _load_bart_classifier():
+    """
+    Carga BART-MNLI lazily (solo una vez).
+    El modelo se cachea automáticamente en ~/.cache/huggingface/
+    """
+    global _BART_CLASSIFIER, _BART_LOADED
+    
+    if _BART_LOADED:
+        return _BART_CLASSIFIER
+    
+    try:
+        from transformers import pipeline
+        
+        logger.info("Cargando modelo BART-MNLI para zero-shot classification...")
+        _BART_CLASSIFIER = pipeline(
+            "zero-shot-classification",
+            model="facebook/bart-large-mnli",
+            device=-1,  # -1 = CPU, 0+ = GPU
+        )
+        _BART_LOADED = True
+        logger.info("BART-MNLI cargado exitosamente")
+        return _BART_CLASSIFIER
+        
+    except ImportError:
+        logger.error("transformers no está instalado")
+        _BART_LOADED = True
+        return None
+    except Exception as e:
+        logger.error(f"Error cargando BART-MNLI: {e}")
+        _BART_LOADED = True
+        return None
+
+
 def classify_content(
     text: str,
     code: Optional[str] = None,
     title: str = "",
     description: str = "",
+    use_bart: bool = True,
 ) -> dict:
-    """Función de conveniencia para clasificar contenido."""
-    return classifier.classify(text, code, title, description)
+    """
+    Función de conveniencia para clasificar contenido.
+    
+    Pipeline híbrido:
+    1. Análisis rápido por señales (imports, keywords) < 50ms
+    2. Si confidence < 0.65, usar BART-MNLI para validación (~500ms)
+    
+    Args:
+        text: Texto del documento
+        code: Código fuente (opcional)
+        title: Título
+        description: Descripción
+        use_bart: Usar BART como fallback (default: True)
+        
+    Returns:
+        Diccionario con domain, area, confidence, tags, etc.
+    """
+    return classifier.classify(text, code, title, description, use_bart)

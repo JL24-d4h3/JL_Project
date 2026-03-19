@@ -48,6 +48,7 @@ class HybridRetriever:
         self._reranker           = None   # CrossEncoder
         self._bm25               = None   # rank_bm25.BM25Okapi
         self._bm25_corpus: list[str] = []   # textos en el mismo orden que _bm25
+        self._bm25_metadata: list[dict] = []  # metadata aligned with _bm25_corpus
 
     # ── Inicialización ────────────────────────────────────────────────────────
 
@@ -117,10 +118,14 @@ class HybridRetriever:
         """Carga todos los documentos de ChromaDB y reconstruye el índice BM25."""
         try:
             from rank_bm25 import BM25Okapi
-            result = self._collection.get(include=["documents"])
+            # Incluir tanto documentos como metadatos para el mapeo
+            result = self._collection.get(include=["documents", "metadatas"])
             docs   = result.get("documents") or []
+            metas  = result.get("metadatas") or []
             if docs:
                 self._bm25_corpus = docs
+                # Mantener mapeo índice -> metadata para filtrado posterior
+                self._bm25_metadata = metas if len(metas) == len(docs) else [{} for _ in docs]
                 self._bm25 = BM25Okapi([d.lower().split() for d in docs])
                 logger.info("BM25 construido con %d documentos", len(docs))
         except ImportError:
@@ -170,7 +175,8 @@ class HybridRetriever:
         query_class = classify_query(query)
         where_filter = None
 
-        # Aplicar filtro solo si la confianza es >= 0.6
+        # Aplicar filtro solo si la confianza es >= 0.6 (confidence claro)
+        # Para confianzas bajas (0.5-0.6), buscar sin filtro (retorna todo)
         if query_class["confidence"] >= 0.6 and query_class["domain"]:
             where_filter = {"auto_domain": query_class["domain"]}
             logger.debug(
@@ -204,6 +210,7 @@ class HybridRetriever:
             chroma_items.append({"text": doc, "meta": meta, "score": score})
 
         # ── 3. Búsqueda BM25 ──────────────────────────────────────────────────
+        # IMPORTANTE: Aplicar el mismo filtro por dominio que en ChromaDB
         bm25_items: list[dict] = []
         if self._bm25 is not None and self._bm25_corpus:
             tokenized_query = query.lower().split()
@@ -217,6 +224,17 @@ class HybridRetriever:
 
             for rank, idx in enumerate(top_bm25_idx):
                 if idx < len(self._bm25_corpus) and bm25_scores[idx] > 0:
+                    # Obtener metadata del corpus (ya está alineada por índice)
+                    corpus_meta = self._bm25_metadata[idx] if idx < len(self._bm25_metadata) else {}
+                    
+                    # Aplicar filtro de dominio (mismo filtro que para ChromaDB)
+                    if where_filter and corpus_meta:
+                        # Si hay un filtro de dominio, verificar que coincida
+                        meta_domain = corpus_meta.get("auto_domain")
+                        filter_domain = where_filter.get("auto_domain")
+                        if meta_domain != filter_domain:
+                            continue  # Saltar este resultado, no coincide con el filtro
+                    
                     # BM25 score normalizado al rango [0, 1] respecto al máximo
                     max_score = bm25_scores[top_bm25_idx[0]] if top_bm25_idx else 1.0
                     norm_score = bm25_scores[idx] / max(max_score, 1e-9)
@@ -224,6 +242,7 @@ class HybridRetriever:
                         "text":  self._bm25_corpus[idx],
                         "score": norm_score,
                         "rank":  rank,
+                        "meta":  corpus_meta,  # Usar metadata del corpus
                     })
 
         # ── 4. RRF (Reciprocal Rank Fusion) ───────────────────────────────────
@@ -240,10 +259,9 @@ class HybridRetriever:
         for rank, item in enumerate(bm25_items):
             key = item["text"][:200]
             if key not in all_texts:
-                # El texto viene solo del corpus, necesitamos buscar su metadata en chroma
-                chroma_meta_match = self._find_metadata_for_text(item["text"])
+                # Ya tenemos metadata del filtrado anterior (en item["meta"])
                 all_texts[key] = {
-                    "item": {"text": item["text"], "meta": chroma_meta_match or {}, "score": item["score"]},
+                    "item": {"text": item["text"], "meta": item.get("meta", {}), "score": item["score"]},
                     "rrf": 0.0,
                 }
             all_texts[key]["rrf"] += 1.0 / (rrf_k + rank)
@@ -275,6 +293,10 @@ class HybridRetriever:
                 "content_type": meta.get("content_type", meta.get("type", "document")),
                 "chunk_type":   meta.get("chunk_type", "section"),
                 "score":        item.get("score", c.get("rrf", 0.0)),
+                # Metadatos de clasificación automática
+                "auto_domain":      meta.get("auto_domain", ""),
+                "auto_area":        meta.get("auto_area", ""),
+                "auto_confidence":  meta.get("auto_confidence", 0.0),
             }
             if "timestamp_start" in meta:
                 entry["timestamp_start"] = meta["timestamp_start"]
