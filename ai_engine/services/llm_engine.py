@@ -15,6 +15,8 @@ Ver docs/ai-search-engine-plan.md §6 para detalles de speculative decoding.
 from __future__ import annotations
 import asyncio
 import logging
+import json
+import re
 from typing import AsyncIterator, Optional
 
 from ai_engine.config import settings
@@ -38,6 +40,13 @@ class LLMEngine:
         self._hf_model               = None   # Fallback: HuggingFace model
         self._hf_tokenizer           = None   # Fallback: HuggingFace tokenizer
         self._mode:         str  = "none"     # "trtllm" | "hf" | "none"
+
+    @property
+    def mode(self) -> str:
+        return self._mode
+
+    def can_adapt_queries(self) -> bool:
+        return self.is_ready and self._mode in ("trtllm", "hf")
 
     # ── Inicialización ─────────────────────────────────────────────────────────
 
@@ -318,6 +327,63 @@ class LLMEngine:
         self._hf_tokenizer = None
         self.is_ready   = False
         self._mode      = "none"
+
+    async def classify_and_expand_query(self, query: str) -> Optional[dict]:
+        """
+        Usa el LLM para clasificar dominio y proponer reescrituras cuando la query es ambigua.
+
+        Returns:
+            {
+              "domain": "NET",
+              "confidence": 0.91,
+              "rewrites": ["simulador de peticiones", ...]
+            }
+            o None si no se pudo parsear salida.
+        """
+        if not self.can_adapt_queries():
+            return None
+
+        prompt = (
+            "Clasifica la consulta en un dominio técnico y da 3 reescrituras útiles. "
+            "Dominios permitidos: AI, CS, SE, DB, NET, MATH, WEB, SYS, OTHER. "
+            "Responde SOLO JSON válido con llaves: domain, confidence, rewrites. "
+            "confidence debe estar entre 0 y 1. rewrites debe ser lista de strings.\n"
+            f"Consulta: {query}"
+        )
+
+        chunks: list[str] = []
+        try:
+            async for token in self.generate_stream(prompt):
+                chunks.append(token)
+                if sum(len(c) for c in chunks) > 1200:
+                    break
+        except Exception as exc:
+            logger.debug("classify_and_expand_query falló al generar: %s", exc)
+            return None
+
+        text = "".join(chunks).strip()
+        if not text:
+            return None
+
+        json_candidate = text
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            json_candidate = match.group(0)
+
+        try:
+            parsed = json.loads(json_candidate)
+            domain = str(parsed.get("domain", "OTHER")).upper()
+            confidence = float(parsed.get("confidence", 0.0))
+            rewrites = parsed.get("rewrites") or []
+            rewrites = [str(r).strip() for r in rewrites if str(r).strip()]
+            return {
+                "domain": domain,
+                "confidence": max(0.0, min(confidence, 1.0)),
+                "rewrites": rewrites[:3],
+            }
+        except Exception:
+            logger.debug("No se pudo parsear JSON de clasificación LLM: %s", text[:200])
+            return None
         logger.info("LLM engine descargado")
 
 

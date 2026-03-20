@@ -21,15 +21,154 @@ Pipeline:
 from __future__ import annotations
 import re
 import logging
+import json
+import time
+import unicodedata
 from collections import Counter
 from typing import Optional
 from pathlib import Path
+from difflib import get_close_matches
 
 logger = logging.getLogger(__name__)
 
 # Singleton para BART-MNLI (lazy loading)
 _BART_CLASSIFIER = None
 _BART_LOADED = False
+_QUERY_EMBEDDER = None
+_USER_TYPO_CACHE: dict[str, str] = {}
+_USER_TYPO_MTIME: float = 0.0
+_USER_TYPO_LAST_CHECK: float = 0.0
+
+_ADAPTIVE_FEEDBACK_PATH = Path(__file__).parent.parent / "calibration" / "query_feedback.jsonl"
+
+_COMMON_QUERY_TYPOS = {
+    "algtimia": "algoritmia",
+    "algortimo": "algoritmo",
+    "algorimto": "algoritmo",
+    "simlador": "simulador",
+    "petciones": "peticiones",
+    "peticione": "peticiones",
+    "artifical": "artificial",
+    "vison": "vision",
+}
+
+_QUERY_TECH_TERMS = {
+    "tic", "tics", "gtics", "sdn", "algoritmo", "algoritmia", "dijkstra",
+    "simulador", "peticiones", "redes", "software", "vision", "artificial",
+    "yolo", "unet", "u-net", "tcp", "socket", "machine", "learning",
+}
+
+
+def _strip_accents(text: str) -> str:
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
+def _load_query_embedder():
+    global _QUERY_EMBEDDER
+    if _QUERY_EMBEDDER is not None:
+        return _QUERY_EMBEDDER
+
+    from sentence_transformers import SentenceTransformer
+    try:
+        _QUERY_EMBEDDER = SentenceTransformer(
+            "intfloat/multilingual-e5-small",
+            cache_folder=str(Path(__file__).parent.parent.parent / ".cache"),
+        )
+    except Exception:
+        _QUERY_EMBEDDER = SentenceTransformer("intfloat/multilingual-e5-small")
+    return _QUERY_EMBEDDER
+
+
+def _load_user_typo_map() -> dict[str, str]:
+    global _USER_TYPO_CACHE, _USER_TYPO_MTIME, _USER_TYPO_LAST_CHECK
+    now = time.time()
+    if now - _USER_TYPO_LAST_CHECK < 10:
+        return _USER_TYPO_CACHE
+    _USER_TYPO_LAST_CHECK = now
+
+    try:
+        if not _ADAPTIVE_FEEDBACK_PATH.exists():
+            return _USER_TYPO_CACHE
+
+        mtime = _ADAPTIVE_FEEDBACK_PATH.stat().st_mtime
+        if mtime <= _USER_TYPO_MTIME:
+            return _USER_TYPO_CACHE
+
+        loaded: dict[str, str] = {}
+        with _ADAPTIVE_FEEDBACK_PATH.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    event = json.loads(line)
+                except Exception:
+                    continue
+                if event.get("event_type") != "query_correction":
+                    continue
+                original = str(event.get("query", "")).strip().lower()
+                corrected = str(event.get("corrected_query", "")).strip().lower()
+                if original and corrected and original != corrected:
+                    loaded[_strip_accents(original)] = _strip_accents(corrected)
+
+        _USER_TYPO_CACHE = loaded
+        _USER_TYPO_MTIME = mtime
+    except Exception as exc:
+        logger.debug("No se pudo cargar typo map adaptativo: %s", exc)
+
+    return _USER_TYPO_CACHE
+
+
+def preprocess_query_text(query: str) -> dict:
+    raw = (query or "").strip()
+    lowered = raw.lower()
+    normalized = _strip_accents(lowered)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    user_typos = _load_user_typo_map()
+    if normalized in user_typos:
+        corrected = user_typos[normalized]
+        return {
+            "original": raw,
+            "normalized": normalized,
+            "corrected": corrected,
+            "used_correction": corrected != normalized,
+            "source": "adaptive_feedback",
+        }
+
+    tokens = normalized.split()
+    corrected_tokens = []
+    changed = False
+    vocabulary = set(_QUERY_TECH_TERMS)
+    vocabulary.update(_strip_accents(k) for k in KEYWORD_SIGNALS.keys())
+    vocabulary.update(_strip_accents(v) for v in DOMAINS.values())
+
+    for tok in tokens:
+        if tok in _COMMON_QUERY_TYPOS:
+            corrected_tokens.append(_COMMON_QUERY_TYPOS[tok])
+            changed = True
+            continue
+
+        if len(tok) <= 3 or tok in vocabulary:
+            corrected_tokens.append(tok)
+            continue
+
+        match = get_close_matches(tok, list(vocabulary), n=1, cutoff=0.86)
+        if match and match[0] != tok:
+            corrected_tokens.append(match[0])
+            changed = True
+        else:
+            corrected_tokens.append(tok)
+
+    corrected = " ".join(corrected_tokens).strip()
+    return {
+        "original": raw,
+        "normalized": normalized,
+        "corrected": corrected,
+        "used_correction": changed and corrected != normalized,
+        "source": "static_typo_map" if changed else "none",
+    }
 
 # =============================================================================
 # TAXONOMÍA DE CLASIFICACIÓN
@@ -290,6 +429,11 @@ KEYWORD_SIGNALS: dict[str, tuple[str, str, float]] = {
     "nosql": ("DB", "nosql", 2.0),
 
     # Networking
+    "sdn": ("NET", "networking", 2.5),
+    "software defined networking": ("NET", "networking", 3.0),
+    "redes definidas por software": ("NET", "networking", 3.0),
+    "telecomunicaciones": ("NET", "networking", 2.0),
+    "networking": ("NET", "networking", 2.0),
     "tcp/ip": ("NET", "networking", 2.5),
     "tcp": ("NET", "networking", 1.5),
     "udp": ("NET", "networking", 1.5),
@@ -303,6 +447,18 @@ KEYWORD_SIGNALS: dict[str, tuple[str, str, float]] = {
     "cliente": ("NET", "networking", 0.8),
     "request": ("NET", "networking", 0.8),
     "response": ("NET", "networking", 0.8),
+
+    # Computer Science / Algorithms
+    "algoritmo": ("CS", "algorithms", 2.5),
+    "algoritmos": ("CS", "algorithms", 2.5),
+    "algoritmia": ("CS", "algorithms", 2.8),
+    "dijkstra": ("CS", "algorithms", 3.2),
+    "grafos": ("CS", "algorithms", 2.2),
+    "graph": ("CS", "algorithms", 2.0),
+    "shortest path": ("CS", "algorithms", 2.6),
+    "camino mas corto": ("CS", "algorithms", 2.6),
+    "complejidad": ("CS", "algorithms", 1.5),
+    "big o": ("CS", "algorithms", 1.8),
 
     # Math
     "álgebra lineal": ("MATH", "linear_algebra", 2.5),
@@ -321,6 +477,61 @@ KEYWORD_SIGNALS: dict[str, tuple[str, str, float]] = {
     "distribución": ("MATH", "statistics", 1.2),
     "distribution": ("MATH", "statistics", 1.2),
 }
+
+
+def extract_semantic_terms(
+    text: str,
+    title: str = "",
+    description: str = "",
+    max_terms: int = 15,
+) -> list[str]:
+    """Extrae términos/frases relevantes de forma abierta (sin taxonomía fija)."""
+    combined = f"{title} {description} {text}".lower()
+    combined = _strip_accents(combined)
+    combined = re.sub(r"[^a-z0-9\s]", " ", combined)
+    combined = re.sub(r"\s+", " ", combined).strip()
+    if not combined:
+        return []
+
+    stop = {
+        "de", "la", "el", "los", "las", "en", "y", "a", "para", "por", "con", "sin", "que",
+        "del", "al", "un", "una", "como", "se", "su", "sus", "es", "son", "this", "that",
+        "from", "with", "for", "and", "the", "to", "of", "in", "on", "is", "are",
+    }
+
+    tokens = [tok for tok in combined.split() if len(tok) >= 3 and tok not in stop]
+    if not tokens:
+        return []
+
+    unigram = Counter(tokens)
+    bigram = Counter(" ".join(pair) for pair in zip(tokens, tokens[1:]))
+    trigram = Counter(" ".join(tri) for tri in zip(tokens, tokens[1:], tokens[2:]))
+
+    scored: list[tuple[str, float]] = []
+    for term, count in unigram.items():
+        scored.append((term, float(count)))
+    for term, count in bigram.items():
+        first, second = term.split()
+        if first in stop or second in stop:
+            continue
+        scored.append((term, float(count) * 1.8))
+    for term, count in trigram.items():
+        tri_parts = term.split()
+        if any(part in stop for part in tri_parts):
+            continue
+        scored.append((term, float(count) * 2.5))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    selected: list[str] = []
+    seen = set()
+    for term, _score in scored:
+        if term in seen:
+            continue
+        seen.add(term)
+        selected.append(term)
+        if len(selected) >= max_terms:
+            break
+    return selected
 
 # Patrones de código (regex)
 CODE_PATTERNS: list[tuple[str, str, str, float]] = [
@@ -411,6 +622,7 @@ class ContentClassifier:
         # Combinar todo el texto para análisis
         full_text = f"{title} {description} {text}".lower()
         code_text = (code or "").lower()
+        semantic_terms = extract_semantic_terms(text=text, title=title, description=description)
 
         # ========== FASE 1: SEÑALES ==========
         # 1. Analizar imports
@@ -466,6 +678,7 @@ class ContentClassifier:
             "area_label": AREAS.get(domain, {}).get(area, area),
             "confidence": round(confidence, 3),
             "tags": list(tags)[:10],
+            "semantic_terms": semantic_terms,
             "signals_found": signals_found[:20],
             "method": "signals",
         }
@@ -638,6 +851,7 @@ class ContentClassifier:
                 "area_label": AREAS.get(domain, {}).get(area, area),
                 "confidence": round(best_score, 3),
                 "tags": [],
+                "semantic_terms": extract_semantic_terms(text=text, title=title, description=description),
                 "signals_found": ["bart-mnli"],
                 "method": "bart-mnli",
             }
@@ -678,73 +892,89 @@ def classify_query(query: str) -> dict:
         }
     """
     try:
-        from sentence_transformers import SentenceTransformer
         from sklearn.metrics.pairwise import cosine_similarity
-        
-        # Cargar embedder (multilingual-e5-small)
-        try:
-            embedder = SentenceTransformer(
-                "intfloat/multilingual-e5-small",
-                cache_folder=str(Path(__file__).parent.parent.parent / ".cache"),
-            )
-        except:
-            embedder = SentenceTransformer("intfloat/multilingual-e5-small")
-        
-        # Generar embedding de la query
-        query_emb = embedder.encode(f"query: {query}", normalize_embeddings=True)
-        
-        # Candidatos: descripciones de cada dominio
-        domain_candidates = []
-        for code, label in DOMAINS.items():
-            description = f"query: {label}. Content about {label}."
-            domain_candidates.append((code, label, description))
-        
-        # Calcular similarities
-        best_domain = None
-        best_score = 0.0
-        best_area = "general"
-        
-        for code, label, desc in domain_candidates:
-            domain_emb = embedder.encode(desc, normalize_embeddings=True)
-            # Cosine similarity
-            similarity = float(cosine_similarity([query_emb], [domain_emb])[0][0])
-            
-            if similarity > best_score:
-                best_score = similarity
-                best_domain = code
-        
-        # Si no hay match claro, retorna None
-        if best_score < 0.5:
-            logger.debug(
-                f"Query '{query}' - No match claro (max_sim={best_score:.2f}) → None"
-            )
+
+        pre = preprocess_query_text(query)
+        query_text = pre["corrected"] if pre.get("corrected") else pre["normalized"]
+        if not query_text:
             return {"domain": None, "area": None, "confidence": 0.0}
-        
-        # Si es AI, intentar clasificar área específica
-        if best_domain == "AI":
-            ai_candidates = []
-            for area_code, area_label in AREAS.get("AI", {}).items():
-                desc = f"query: {area_label}. Content about {area_label}."
-                ai_candidates.append((area_code, area_label, desc))
-            
-            best_area_score = 0.0
-            for code, label, desc in ai_candidates:
-                area_emb = embedder.encode(desc, normalize_embeddings=True)
-                similarity = float(cosine_similarity([query_emb], [area_emb])[0][0])
-                if similarity > best_area_score:
-                    best_area_score = similarity
-                    best_area = code
-        
-        logger.debug(
-            f"Query '{query}' → {best_domain}/{best_area} (similarity={best_score:.3f})"
-        )
-        
+
+        embedder = _load_query_embedder()
+        query_emb = embedder.encode(f"query: {query_text}", normalize_embeddings=True)
+
+        domain_profiles = {
+            "AI": "query: inteligencia artificial machine learning deep learning computer vision nlp yolo unet",
+            "CS": "query: ciencias de la computacion algoritmos estructuras de datos grafos dijkstra complejidad",
+            "SE": "query: ingenieria de software arquitectura patrones testing calidad codigo",
+            "DB": "query: bases de datos sql nosql consultas transacciones postgres",
+            "NET": "query: redes comunicaciones tcp ip socket protocolos sdn enrutamiento",
+            "MATH": "query: matematicas estadistica algebra lineal calculo optimizacion probabilidad",
+            "WEB": "query: desarrollo web frontend backend api javascript html css",
+            "SYS": "query: sistemas devops linux contenedores docker kubernetes infraestructura",
+            "OTHER": "query: tema general no tecnico conversacion cotidiana agricultura astronomia geologia historia arte",
+        }
+
+        domain_codes = list(domain_profiles.keys())
+        profile_texts = [domain_profiles[code] for code in domain_codes]
+        profile_embs = embedder.encode(profile_texts, normalize_embeddings=True)
+
+        sims = cosine_similarity([query_emb], profile_embs)[0]
+        lexical_scores: Counter = Counter()
+        for keyword, (domain, _area, weight) in KEYWORD_SIGNALS.items():
+            if keyword in query_text:
+                lexical_scores[domain] += weight
+
+        if lexical_scores:
+            max_lex = max(lexical_scores.values())
+            for idx, code in enumerate(domain_codes):
+                if code in lexical_scores:
+                    sims[idx] += 0.12 * (lexical_scores[code] / max(max_lex, 1.0))
+
+        best_idx = int(sims.argmax())
+        best_domain = domain_codes[best_idx]
+        best_score = max(0.0, min(float(sims[best_idx]), 1.0))
+
+        other_idx = domain_codes.index("OTHER")
+        other_score = float(sims[other_idx])
+        sorted_scores = sorted((float(x), domain_codes[i]) for i, x in enumerate(sims))
+        top_score, top_domain = sorted_scores[-1]
+        second_score, _second_domain = sorted_scores[-2]
+
+        # Evitar clasificaciones forzadas cuando la query es muy abierta o fuera de corpus
+        if top_domain == "OTHER" or top_score < 0.70 or (top_score - second_score) < 0.03 or (top_score - other_score) < 0.05:
+            return {
+                "domain": None,
+                "area": None,
+                "confidence": 0.0,
+                "query_normalized": pre["normalized"],
+                "query_corrected": pre["corrected"],
+                "query_corrected_used": pre["used_correction"],
+                "query_correction_source": pre["source"],
+            }
+
+        best_area = "general"
+        if best_domain in AREAS:
+            area_codes = list(AREAS[best_domain].keys())
+            area_labels = [AREAS[best_domain][code] for code in area_codes]
+            area_profiles = [
+                f"query: {label} {' '.join(label.lower().split())} {query_text}"
+                for label in area_labels
+            ]
+            area_embs = embedder.encode(area_profiles, normalize_embeddings=True)
+            area_sims = cosine_similarity([query_emb], area_embs)[0]
+            area_idx = int(area_sims.argmax())
+            best_area = area_codes[area_idx]
+
         return {
             "domain": best_domain,
             "area": best_area,
             "confidence": round(best_score, 3),
+            "query_normalized": pre["normalized"],
+            "query_corrected": pre["corrected"],
+            "query_corrected_used": pre["used_correction"],
+            "query_correction_source": pre["source"],
         }
-        
+
     except Exception as e:
         logger.error(f"Error en classify_query con embeddings: {e}")
         import traceback

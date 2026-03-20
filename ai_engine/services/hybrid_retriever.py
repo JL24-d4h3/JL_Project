@@ -16,6 +16,8 @@ Ver docs/ai-search-engine-plan.md §10 y docs/auto-classification-proposal.md pa
 from __future__ import annotations
 import asyncio
 import logging
+import re
+import unicodedata
 from typing import Optional
 
 # Pre-importar transformers para evitar problemas de lazy loading en async context
@@ -30,6 +32,56 @@ from ai_engine.services.classifier import classify_query
 logger = logging.getLogger(__name__)
 
 _COLLECTION_NAME = "cdn_chunks"
+
+
+def _normalize_text(value: str) -> str:
+    value = (value or "").strip().lower()
+    normalized = unicodedata.normalize("NFD", value)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
+def _title_relevance_boost(query: str, title: str) -> float:
+    q = _normalize_text(query)
+    t = _normalize_text(title)
+    if not q or not t:
+        return 0.0
+
+    if q == t:
+        return 0.95
+    if len(q) <= 5:
+        title_tokens = re.findall(r"[a-z0-9]+", t)
+        if q in title_tokens:
+            return 0.95
+    if q in t:
+        return 0.60
+
+    q_tokens = [tok for tok in q.split() if len(tok) >= 3]
+    if not q_tokens:
+        return 0.0
+
+    overlap = sum(1 for tok in q_tokens if tok in t)
+    ratio = overlap / len(q_tokens)
+    if ratio >= 0.8:
+        return 0.18
+    if ratio >= 0.5:
+        return 0.10
+    return 0.0
+
+
+def _has_query_overlap(query: str, title: str, text: str) -> bool:
+    q = _normalize_text(query)
+    if not q:
+        return False
+    stop = {
+        "de", "la", "el", "los", "las", "en", "y", "a", "para", "por", "con", "sin", "que",
+        "del", "al", "un", "una", "como", "se", "su", "sus", "es", "son", "the", "and", "for",
+        "from", "with", "this", "that", "are", "is",
+    }
+    tokens = [tok for tok in re.findall(r"[a-z0-9]+", q) if len(tok) >= 4 and tok not in stop]
+    if not tokens:
+        return False
+    combined = f"{_normalize_text(title)} {_normalize_text(text)}"
+    return any(tok in combined for tok in tokens)
 
 
 class HybridRetriever:
@@ -57,7 +109,12 @@ class HybridRetriever:
         Carga ChromaDB, el modelo de embeddings multilingual-e5-small y
         (si está habilitado) el cross-encoder de reranking.
         Llamado una sola vez en el lifespan de main.py.
+        Idempotente: puede ser llamado múltiples veces sin problemas.
         """
+        if self.is_ready:
+            logger.debug("Retriever ya inicializado, saltando init()")
+            return
+            
         logger.info(
             "Inicializando retriever — ChromaDB: %s | embedder device: %s",
             settings.CHROMADB_PATH,
@@ -171,19 +228,44 @@ class HybridRetriever:
     def _search_sync(self, query: str, k_fetch: int, k_final: int) -> list[dict]:
         """Pipeline síncrono de búsqueda ejecutado en un executor."""
 
-        # ── 0. Clasificar la query para pre-filtrado ──────────────────────────
+        # ── 0. Corrección de typos y limpieza ──────────────────────────
         query_class = classify_query(query)
+        effective_query = query_class.get("query_corrected") or query
+        
+        # Filtro restrictivo si de verdad es muy claro el dominio y hay buena confianza
+        domain_val = query_class.get("domain")
+        confidence = float(query_class.get("confidence", 0.0))
         where_filter = None
+        if domain_val and confidence > 0.60:
+            where_filter = {"auto_domain": domain_val}
+            
+        primary_results = self._search_with_filter(
+            effective_query,
+            k_fetch=k_fetch * 2,  
+            k_final=k_final,
+            where_filter=where_filter,
+        )
+        
+        # Si fallamos en encontrar, intentamos SIN filtro para recuperar recall
+        if not primary_results and where_filter is not None:
+             primary_results = self._search_with_filter(
+                 effective_query,
+                 k_fetch=k_fetch * 2,
+                 k_final=k_final,
+                 where_filter=None,
+             )
+        
+        # ── Omitimos filtrado de Overlap para búsquedas puramente semánticas ──
+        return primary_results[:k_final]
 
-        # Aplicar filtro solo si la confianza es >= 0.6 (confidence claro)
-        # Para confianzas bajas (0.5-0.6), buscar sin filtro (retorna todo)
-        if query_class["confidence"] >= 0.6 and query_class["domain"]:
-            where_filter = {"auto_domain": query_class["domain"]}
-            logger.debug(
-                "[SEARCH] Pre-filtrado por clasificación: domain=%s (conf=%.2f)",
-                query_class["domain"],
-                query_class["confidence"],
-            )
+    def _search_with_filter(
+        self,
+        query: str,
+        k_fetch: int,
+        k_final: int,
+        where_filter: Optional[dict],
+    ) -> list[dict]:
+        """Ejecuta búsqueda completa con un filtro opcional de dominio."""
 
         # ── 1. Embedding de la query ──────────────────────────────────────────
         # multilingual-e5 requiere prefijo "query: " para consultas
@@ -227,7 +309,7 @@ class HybridRetriever:
                     # Obtener metadata del corpus (ya está alineada por índice)
                     corpus_meta = self._bm25_metadata[idx] if idx < len(self._bm25_metadata) else {}
                     
-                    # Aplicar filtro de dominio (mismo filtro que para ChromaDB)
+                    # Filtrar alucinaciones de dominio y BM25 scores débiles
                     if where_filter and corpus_meta:
                         # Si hay un filtro de dominio, verificar que coincida
                         meta_domain = corpus_meta.get("auto_domain")
@@ -235,9 +317,12 @@ class HybridRetriever:
                         if meta_domain != filter_domain:
                             continue  # Saltar este resultado, no coincide con el filtro
                     
-                    # BM25 score normalizado al rango [0, 1] respecto al máximo
+                    # BM25 score normalizado al rango [0, 1] 
+                    # IMPORTANTE: Forzar un denominador mínimo (10.0) para que 
+                    # matches débiles (ej. stopwords) no se inflen a 1.0!
                     max_score = bm25_scores[top_bm25_idx[0]] if top_bm25_idx else 1.0
-                    norm_score = bm25_scores[idx] / max(max_score, 1e-9)
+                    effective_max = max(max_score, 10.0)  
+                    norm_score = bm25_scores[idx] / effective_max
                     bm25_items.append({
                         "text":  self._bm25_corpus[idx],
                         "score": norm_score,
@@ -253,7 +338,9 @@ class HybridRetriever:
         for rank, item in enumerate(chroma_items):
             key = item["text"][:200]
             if key not in all_texts:
-                all_texts[key] = {"item": item, "rrf": 0.0}
+                all_texts[key] = {"item": dict(item), "rrf": 0.0, "max_score": item.get("score", 0.0)}
+            else:
+                all_texts[key]["max_score"] = max(all_texts[key]["max_score"], item.get("score", 0.0))
             all_texts[key]["rrf"] += 1.0 / (rrf_k + rank)
 
         for rank, item in enumerate(bm25_items):
@@ -263,11 +350,19 @@ class HybridRetriever:
                 all_texts[key] = {
                     "item": {"text": item["text"], "meta": item.get("meta", {}), "score": item["score"]},
                     "rrf": 0.0,
+                    "max_score": item["score"]
                 }
+            else:
+                all_texts[key]["max_score"] = max(all_texts[key]["max_score"], item["score"])
             all_texts[key]["rrf"] += 1.0 / (rrf_k + rank)
 
         # Ordenar por RRF descendente
         ranked = sorted(all_texts.values(), key=lambda x: x["rrf"], reverse=True)
+        
+        # Restaurar score real máximo (en lugar del infimo rrf) para que el threshold posterior funcione
+        for c in ranked:
+            c["item"]["score"] = c["max_score"]
+
         top_candidates = ranked[:k_fetch]
 
         # ── 5. Cross-Encoder reranking ────────────────────────────────────────
@@ -298,12 +393,73 @@ class HybridRetriever:
                 "auto_area":        meta.get("auto_area", ""),
                 "auto_confidence":  meta.get("auto_confidence", 0.0),
             }
+            boost = _title_relevance_boost(query, entry["title"])
+            if boost > 0:
+                entry["score"] = round(min(1.0, float(entry["score"]) + boost), 4)
             if "timestamp_start" in meta:
                 entry["timestamp_start"] = meta["timestamp_start"]
                 entry["timestamp_end"]   = meta.get("timestamp_end", meta["timestamp_start"])
             results.append(entry)
 
-        return results
+        results.sort(key=lambda r: float(r.get("score", 0.0)), reverse=True)
+        return self._diversify_by_content(results, k_final)
+
+    def _diversify_by_content(self, results: list[dict], k_final: int) -> list[dict]:
+        """Reduce dominancia de un solo content_id en top-k para mejorar cobertura de fuentes."""
+        per_content_limit = 2
+        picked: list[dict] = []
+        counter: dict[str, int] = {}
+
+        for item in results:
+            content_id = item.get("content_id", "") or "__unknown__"
+            used = counter.get(content_id, 0)
+            if used >= per_content_limit:
+                continue
+            picked.append(item)
+            counter[content_id] = used + 1
+            if len(picked) >= k_final:
+                break
+
+        if len(picked) < k_final:
+            seen_keys = {(x.get("content_id", ""), x.get("text", "")[:120]) for x in picked}
+            for item in results:
+                key = (item.get("content_id", ""), item.get("text", "")[:120])
+                if key in seen_keys:
+                    continue
+                picked.append(item)
+                seen_keys.add(key)
+                if len(picked) >= k_final:
+                    break
+
+        return picked[:k_final]
+
+    def _merge_results(
+        self,
+        filtered_results: list[dict],
+        fallback_results: list[dict],
+        k_final: int,
+    ) -> list[dict]:
+        """Mezcla resultados priorizando filtrados y completando con fallback sin duplicar."""
+        merged: list[dict] = []
+        seen: set[tuple[str, str]] = set()
+
+        for item in filtered_results:
+            key = (item.get("content_id", ""), item.get("text", "")[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+
+        for item in fallback_results:
+            key = (item.get("content_id", ""), item.get("text", "")[:120])
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(item)
+            if len(merged) >= k_final:
+                break
+
+        return merged[:k_final]
 
     def _find_metadata_for_text(self, text: str) -> Optional[dict]:
         """Busca la metadata de un texto en ChromaDB (para chunks que vienen solo de BM25)."""
@@ -387,10 +543,13 @@ class HybridRetriever:
         if not new_texts:
             return
         try:
-            from rank_bm25 import BM25Okapi
-            self._bm25_corpus.extend(new_texts)
-            self._bm25 = BM25Okapi([t.lower().split() for t in self._bm25_corpus])
-            logger.debug("update_bm25: corpus ahora tiene %d textos", len(self._bm25_corpus))
+            # Rebuild completo para mantener alineación corpus <-> metadata
+            self._rebuild_bm25_from_chroma()
+            logger.debug(
+                "update_bm25: reconstruido desde ChromaDB (corpus=%d, metadata=%d)",
+                len(self._bm25_corpus),
+                len(self._bm25_metadata),
+            )
         except ImportError:
             pass   # rank_bm25 no instalado — BM25 deshabilitado silenciosamente
         except Exception as exc:

@@ -29,6 +29,8 @@ from pydantic import BaseModel
 from ai_engine.config import settings, prompts
 from ai_engine.services.hybrid_retriever import retriever
 from ai_engine.services.llm_engine import llm_engine
+from ai_engine.services.classifier import classify_query
+from ai_engine.services.adaptive_learning import record_search_event, record_feedback_event
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -39,10 +41,25 @@ class SearchRequest(BaseModel):
     context: dict = {}
 
 
+class SearchFeedbackRequest(BaseModel):
+    event_type: str
+    query: str
+    content_id: str | None = None
+    corrected_query: str | None = None
+    notes: str | None = None
+
+
 # ── Triage thresholds ────────────────────────────────────────────────────────
 _L1_MIN_SCORE  = 0.70   # chunks con score >= L1_MIN → nivel L1 (solo fuentes)
 _L2_MIN_CHUNKS = 1      # al menos 1 chunk con score aceptable → nivel L2
-_MIN_SCORE     = 0.35   # por debajo de este score el chunk no aporta
+
+# Umbral estricto para filtrar resultados poco relevantes.
+# ChromaDB puede devolver scores altos incluso para queries irrelevantes,
+# especialmente cuando hay pocos documentos indexados.
+# Con cross-encoder OFF: threshold alto pero no tanto (0.89)
+# Con cross-encoder ON: el reranking normaliza mejor, threshold más bajo (0.50)
+_MIN_SCORE     = 0.89 if not settings.CROSS_ENCODER_ENABLED else 0.50  
+
 _AMBIGUOUS_LEN = 3      # query de <= 3 palabras sin chunks → L4 (aclarar)
 
 
@@ -120,7 +137,12 @@ def _chunks_to_cdn_cards(chunks: list[dict]) -> list[dict]:
     seen:  dict[str, dict] = {}
     for chunk in chunks:
         cid   = chunk.get("content_id", "")
-        score = chunk.get("score", 0)
+        score = float(chunk.get("score", 0.0))
+
+        # Filtrar resultados poco relevantes (threshold estricto)
+        if score < _MIN_SCORE:
+            continue
+            
         if cid not in seen or score > seen[cid].get("relevance_score", 0):
             ts = chunk.get("timestamp_start")
             viewer_suffix = f"?t={ts:.0f}" if ts is not None else ""
@@ -177,40 +199,98 @@ async def _search_generator(query: str, context: dict) -> AsyncIterator[str]:
         yield _sse({"type": "error", "message": "Query vacía"})
         return
 
+    query_class = classify_query(query)
+    effective_query = query_class.get("query_corrected") or query
+
+    # Gate con Llama 3.2-1B solo en ambigüedad o baja confianza
+    if (
+        (query_class.get("confidence", 0.0) < 0.62 or query_class.get("domain") is None)
+        and llm_engine.can_adapt_queries()
+    ):
+        llm_adapt = await llm_engine.classify_and_expand_query(effective_query)
+        if llm_adapt and llm_adapt.get("rewrites"):
+            effective_query = llm_adapt["rewrites"][0]
+            logger.info(
+                "[SEARCH] Query adaptada por LLM: '%s' -> '%s' (domain=%s conf=%.2f)",
+                query,
+                effective_query,
+                llm_adapt.get("domain"),
+                llm_adapt.get("confidence", 0.0),
+            )
+
     # 1. Recuperar chunks
     try:
-        chunks = await retriever.search(query, top_k=settings.TOP_K_FINAL)
+        chunks = await retriever.search(effective_query, top_k=settings.TOP_K_FINAL)
     except Exception as exc:
         logger.warning("Retriever falló para query='%s': %s — usando resultados vacíos", query, exc)
         chunks = []
 
     # 2. Construir tarjetas CDN y emitirlas primero (el frontend las muestra de inmediato)
     cards = _chunks_to_cdn_cards(chunks)
+
+    # Segundo intento con LLM si aún no hay resultados
+    if not cards and llm_engine.can_adapt_queries():
+        llm_adapt = await llm_engine.classify_and_expand_query(effective_query)
+        if llm_adapt and llm_adapt.get("rewrites"):
+            retry_query = llm_adapt["rewrites"][0]
+            if retry_query and retry_query != effective_query:
+                retry_chunks = await retriever.search(retry_query, top_k=settings.TOP_K_FINAL)
+                retry_cards = _chunks_to_cdn_cards(retry_chunks)
+                if retry_cards:
+                    effective_query = retry_query
+                    chunks = retry_chunks
+                    cards = retry_cards
     yield _sse({"type": "cdn_results", "data": cards})
 
     # Pequeño delay para que el frontend renderice las tarjetas antes del streaming
     await asyncio.sleep(0.05)
 
     # 3. Triage
-    level = _triage_from_query_and_chunks(query, chunks)
+    level = _triage_from_query_and_chunks(effective_query, chunks)
     logger.debug("search query='%s' level=%s chunks=%d cards=%d", query, level, len(chunks), len(cards))
 
-    # 4. Construir prompt y streamear LLM
-    prompt = _build_prompt(query, chunks, level)
+    record_search_event(
+        query=query,
+        effective_query=effective_query,
+        query_domain=query_class.get("domain"),
+        query_confidence=query_class.get("confidence", 0.0),
+        result_count=len(cards),
+        top_content_ids=[c.get("content_id", "") for c in cards],
+    )
 
-    try:
-        async for token in llm_engine.generate_stream(prompt):
-            yield _sse({"type": "token", "text": token})
-    except Exception as exc:
-        logger.error("LLM generate_stream falló: %s", exc)
-        # Emitir mensaje de fallback en lugar de silencio
-        fallback = (
-            "No se pudo generar una respuesta en este momento. "
-            "Por favor, revisa los recursos de la CDN en los resultados anteriores."
-        )
-        for word in fallback.split():
-            yield _sse({"type": "token", "text": word + " "})
-            await asyncio.sleep(0.02)
+    record_search_event(
+        query=query,
+        effective_query=effective_query,
+        query_domain=query_class.get("domain"),
+        query_confidence=query_class.get("confidence", 0.0),
+        result_count=len(cards),
+        top_content_ids=[c.get("content_id", "") for c in cards],
+    )
+
+    # 4. Construir prompt y streamear LLM (solo si hay resultados y no estamos en laptop/CPU)
+    should_generate_overview = bool(cards) and settings.PLATFORM != "laptop"
+
+    if should_generate_overview:
+        prompt = _build_prompt(effective_query, chunks, level)
+        try:
+            async for token in llm_engine.generate_stream(prompt):
+                yield _sse({"type": "token", "text": token})
+        except Exception as exc:
+            logger.error("LLM generate_stream falló: %s", exc)
+            # Emitir mensaje de fallback en lugar de silencio
+            fallback = (
+                "No se pudo generar una respuesta en este momento. "
+                "Por favor, revisa los recursos de la CDN en los resultados anteriores."
+            )
+            for word in fallback.split():
+                yield _sse({"type": "token", "text": word + " "})
+                await asyncio.sleep(0.02)
+    else:
+        # No generar overview en CPU (evita sobrecalentamiento)
+        if not cards:
+            yield _sse({"type": "token", "text": "No se encontraron resultados relevantes para tu búsqueda."})
+        else:
+            yield _sse({"type": "token", "text": "Resultados encontrados. Revisa las tarjetas anteriores."})
 
     # 5. Evento de cierre
     yield _sse({
@@ -237,20 +317,46 @@ async def search(req: SearchRequest):
     if not query:
         return {"error": "Query vacía"}
 
-    chunks  = await retriever.search(query, top_k=settings.TOP_K_FINAL)
+    query_class = classify_query(query)
+    effective_query = query_class.get("query_corrected") or query
+
+    if (
+        (query_class.get("confidence", 0.0) < 0.62 or query_class.get("domain") is None)
+        and llm_engine.can_adapt_queries()
+    ):
+        llm_adapt = await llm_engine.classify_and_expand_query(effective_query)
+        if llm_adapt and llm_adapt.get("rewrites"):
+            effective_query = llm_adapt["rewrites"][0]
+
+    chunks  = await retriever.search(effective_query, top_k=settings.TOP_K_FINAL)
     cards   = _chunks_to_cdn_cards(chunks)
-    level   = _triage_from_query_and_chunks(query, chunks)
-    prompt  = _build_prompt(query, chunks, level)
+    level   = _triage_from_query_and_chunks(effective_query, chunks)
+    prompt  = _build_prompt(effective_query, chunks, level)
+
+    record_search_event(
+        query=query,
+        effective_query=effective_query,
+        query_domain=query_class.get("domain"),
+        query_confidence=query_class.get("confidence", 0.0),
+        result_count=len(cards),
+        top_content_ids=[c.get("content_id", "") for c in cards],
+    )
 
     tokens: list[str] = []
-    try:
-        async for tok in llm_engine.generate_stream(prompt):
-            tokens.append(tok)
-    except Exception as exc:
-        logger.error("LLM falló en /search: %s", exc)
+    # No generar overview en laptop/CPU para evitar sobrecalentamiento
+    # Solo generar si hay resultados para evitar alucinaciones
+    should_generate_overview = bool(cards) and settings.PLATFORM != "laptop"
+
+    if should_generate_overview:
+        try:
+            async for tok in llm_engine.generate_stream(prompt):
+                tokens.append(tok)
+        except Exception as exc:
+            logger.error("LLM falló en /search: %s", exc)
 
     return {
         "query":       query,
+        "effective_query": effective_query,
         "cdn_results": cards,
         "ai_overview": {
             "text":    "".join(tokens),
@@ -263,6 +369,18 @@ async def search(req: SearchRequest):
         },
         "suggestions": _generate_suggestions(query, level),
     }
+
+
+@router.post("/search/feedback")
+async def search_feedback(req: SearchFeedbackRequest):
+    record_feedback_event(
+        event_type=req.event_type,
+        query=req.query,
+        content_id=req.content_id,
+        corrected_query=req.corrected_query,
+        notes=req.notes,
+    )
+    return {"status": "ok"}
 
 
 @router.post("/search/stream")
