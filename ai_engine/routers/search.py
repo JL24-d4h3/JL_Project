@@ -53,12 +53,10 @@ class SearchFeedbackRequest(BaseModel):
 _L1_MIN_SCORE  = 0.70   # chunks con score >= L1_MIN → nivel L1 (solo fuentes)
 _L2_MIN_CHUNKS = 1      # al menos 1 chunk con score aceptable → nivel L2
 
-# Umbral estricto para filtrar resultados poco relevantes.
-# ChromaDB puede devolver scores altos incluso para queries irrelevantes,
-# especialmente cuando hay pocos documentos indexados.
-# Con cross-encoder OFF: threshold alto pero no tanto (0.89)
-# Con cross-encoder ON: el reranking normaliza mejor, threshold más bajo (0.50)
-_MIN_SCORE     = 0.89 if not settings.CROSS_ENCODER_ENABLED else 0.50  
+# Umbral para filtrar resultados poco relevantes.
+# Balance: 0.86 permite variantes (algoritmia→algoritmo) pero filtra irrelevantes (agricultura)
+# Con cross-encoder ON: el reranking normaliza mejor, threshold más bajo (0.45)
+_MIN_SCORE     = 0.86 if not settings.CROSS_ENCODER_ENABLED else 0.45  
 
 _AMBIGUOUS_LEN = 3      # query de <= 3 palabras sin chunks → L4 (aclarar)
 

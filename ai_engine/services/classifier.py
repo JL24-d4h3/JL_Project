@@ -42,6 +42,7 @@ _USER_TYPO_LAST_CHECK: float = 0.0
 _ADAPTIVE_FEEDBACK_PATH = Path(__file__).parent.parent / "calibration" / "query_feedback.jsonl"
 
 _COMMON_QUERY_TYPOS = {
+    # Typos comunes
     "algtimia": "algoritmia",
     "algortimo": "algoritmo",
     "algorimto": "algoritmo",
@@ -50,6 +51,14 @@ _COMMON_QUERY_TYPOS = {
     "peticione": "peticiones",
     "artifical": "artificial",
     "vison": "vision",
+    # Variantes y sinónimos (fuzzy matching)
+    "algoritmia": "algoritmo",  # algoritmia → buscar también algoritmo
+    "unet": "u-net",            # unet sin guión → buscar u-net
+    "yolov5": "yolo",           # versiones específicas → término general
+    "yolov8": "yolo",
+    "nvidia": "jetson nvidia gpu",  # expandir para buscar relacionados
+    "gpu": "nvidia gpu cuda",
+    "cuda": "nvidia cuda gpu",
 }
 
 _QUERY_TECH_TERMS = {
