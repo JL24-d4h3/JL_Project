@@ -1,5 +1,5 @@
 import { Request, Response } from 'express';
-import bcrypt from 'bcrypt';
+import { hash, verify } from 'argon2';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { query } from '../config/database.js';
@@ -9,18 +9,20 @@ import { LoginRequest, LoginResponse, UserDTO } from '../models/index.js';
 const JWT_SECRET = process.env.JWT_SECRET || 'your-secret-key-change-in-production';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
 
-// POST /api/auth/login
+// POST /api/auth/sign-in o /api/auth/login
 export const login = asyncHandler(async (req: Request, res: Response) => {
-  const { username, password } = req.body as LoginRequest;
+  const { username, password, email_or_username } = req.body as LoginRequest & { email_or_username?: string };
 
-  if (!username || !password) {
-    throw new AppError('Username and password are required', 400);
+  const emailOrUsername = email_or_username || username;
+
+  if (!emailOrUsername || !password) {
+    throw new AppError('Email/Username and password are required', 400);
   }
 
-  // Buscar usuario
+  // Buscar usuario por email O username
   const result = await query(
-    'SELECT * FROM users WHERE username = $1 AND is_active = true',
-    [username]
+    'SELECT * FROM users WHERE (username = $1 OR email = $1) AND is_active = true',
+    [emailOrUsername]
   );
 
   if (result.rowCount === 0) {
@@ -41,12 +43,12 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   }
 
   // Verificar contraseña
-  const isValidPassword = await bcrypt.compare(password, user.password_hash);
+  const isValidPassword = await verify(user.password_hash, password);
 
   if (!isValidPassword) {
     // Incrementar intentos fallidos
     const newAttempts = user.login_attempts + 1;
-    const lockUntil = newAttempts >= 5 
+    const lockUntil = newAttempts >= 5
       ? new Date(Date.now() + 15 * 60 * 1000) // 15 minutos
       : null;
 
@@ -105,7 +107,73 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
   });
 });
 
-// GET /api/auth/me - Usuario actual
+// POST /api/auth/sign-up
+export const signup = asyncHandler(async (req: Request, res: Response) => {
+  const { email, username, password, full_name } = req.body;
+
+  if (!email || !username || !password || !full_name) {
+    throw new AppError('Email, username, password, and full name are required', 400);
+  }
+
+  // Verificar si el usuario ya existe
+  const existingUser = await query(
+    'SELECT id FROM users WHERE email = $1 OR username = $2',
+    [email, username]
+  );
+
+  if (existingUser.rowCount > 0) {
+    throw new AppError('Email or username already exists', 400);
+  }
+
+  // Hash de la contraseña
+  const passwordHash = await hash(password);
+
+  // Crear nuevo usuario
+  const result = await query(
+    `INSERT INTO users (id, email, username, password_hash, full_name, is_active, created_at, updated_at)
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, true, NOW(), NOW())
+     RETURNING id, email, username, full_name, created_at`,
+    [email, username, passwordHash, full_name]
+  );
+
+  const newUser = result.rows[0];
+
+  // Generar JWT
+  const token = jwt.sign(
+    { id: newUser.id, username: newUser.username, role: 'user' },
+    JWT_SECRET,
+    { expiresIn: JWT_EXPIRES_IN as string }
+  );
+
+  // Crear sesión
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  await query(
+    `INSERT INTO sessions (user_id, token_hash, ip_address, user_agent, expires_at)
+     VALUES ($1, $2, $3, $4, NOW() + INTERVAL '7 days')`,
+    [newUser.id, tokenHash, req.ip, req.get('user-agent')]
+  );
+
+  const userDTO: UserDTO = {
+    id: newUser.id,
+    username: newUser.username,
+    email: newUser.email,
+    full_name: newUser.full_name,
+    role: 'user',
+    is_active: true,
+    created_at: newUser.created_at,
+  };
+
+  const response: LoginResponse = {
+    token,
+    user: userDTO,
+    expires_in: 7 * 24 * 60 * 60,
+  };
+
+  res.status(201).json({
+    success: true,
+    data: response,
+  });
+});
 export const getMe = asyncHandler(async (req: Request, res: Response) => {
   if (!req.user) {
     throw new AppError('Not authenticated', 401);
