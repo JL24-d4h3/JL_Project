@@ -11,6 +11,9 @@ Ver docs/ai-search-engine-plan.md §9.1 para el diseño.
 from __future__ import annotations
 import asyncio
 import logging
+import zipfile
+import tempfile
+import shutil
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -166,6 +169,53 @@ async def extract_text(file_path: str, mime_type: str = "") -> str:
         except Exception as exc:
             logger.error("Error leyendo texto plano %s: %s", file_path, exc)
             return ""
+    elif ext == ".zip" or "zip" in mime_type:
+        return await extract_text_from_zip(file_path)
     else:
         logger.warning("Tipo no soportado para extracción de texto: ext=%s mime=%s", ext, mime_type)
         return ""
+
+async def extract_text_from_zip(file_path: str) -> str:
+    """Extrae texto de PDFs y DOCXs contenidos en un archivo ZIP."""
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(None, _extract_zip_sync, file_path)
+
+def _extract_zip_sync(file_path: str) -> str:
+    texts = []
+    try:
+        with zipfile.ZipFile(file_path, "r") as z:
+            # Filtrar archivos soportados (evitar extracción completa por seguridad y memoria)
+            suported_exts = (".pdf", ".docx", ".doc", ".txt", ".md", ".csv")
+            valid_files = [info for info in z.infolist() if not info.is_dir() and info.filename.lower().endswith(suported_exts) and not "__MACOSX" in info.filename]
+            
+            # Limitar a máximo 50 archivos por ZIP para no saturar
+            for info in valid_files[:50]:
+                logger.debug("Procesando archivo dentro de ZIP: %s", info.filename)
+                with tempfile.NamedTemporaryFile(suffix=Path(info.filename).suffix, delete=False) as tmp_file:
+                    with z.open(info.filename) as source_file:
+                        shutil.copyfileobj(source_file, tmp_file)
+                    tmp_file_path = tmp_file.name
+                
+                try:
+                    # Extraer texto según extensión
+                    ext = Path(info.filename).suffix.lower()
+                    if ext == ".pdf":
+                        extracted = _extract_sync(tmp_file_path)
+                    elif ext in (".docx", ".doc"):
+                        extracted = _extract_docx_sync(tmp_file_path)
+                    else:
+                        with open(tmp_file_path, "r", encoding="utf-8", errors="replace") as text_file:
+                            extracted = text_file.read().strip()
+                    
+                    if extracted:
+                        texts.append(f"--- Archivo: {Path(info.filename).name} ---\n{extracted}")
+                except Exception as exc:
+                    logger.warning("Error procesando archivo dentro de ZIP %s: %s", info.filename, exc)
+                finally:
+                    # Limpiar archivo temporal
+                    Path(tmp_file_path).unlink(missing_ok=True)
+                    
+    except Exception as exc:
+        logger.error("Error abriendo archivo ZIP %s: %s", file_path, exc)
+    
+    return "\n\n".join(texts)

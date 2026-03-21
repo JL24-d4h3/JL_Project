@@ -12,6 +12,7 @@ import categoryRoutes from './routes/categories.js';
 import contentRoutes from './routes/content.js';
 import uploadRoutes from './routes/upload.js';
 import systemRoutes from './routes/system.js';
+import courseRoutes from './routes/courses.js';
 import { startFileWatcher } from './services/fileWatcherService.js';
 
 // Cargar variables de entorno
@@ -36,6 +37,7 @@ app.use((req, res, next) => {
 app.use('/api/auth', authRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/content', contentRoutes);
+app.use('/api/courses', courseRoutes);
 app.use('/api/upload', uploadRoutes);
 app.use('/api/system', systemRoutes);
 
@@ -67,6 +69,7 @@ app.get('/', (req, res) => {
       auth: '/api/auth',
       categories: '/api/categories',
       content: '/api/content',
+      courses: '/api/courses',
     },
   });
 });

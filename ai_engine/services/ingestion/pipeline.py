@@ -294,6 +294,11 @@ async def _index_chunks(
     """
     from ai_engine.services.hybrid_retriever import retriever
 
+    # Asegurar que el retriever está inicializado
+    if not retriever.is_ready:
+        logger.info("[INGEST] Inicializando retriever (no estaba listo)...")
+        await retriever.init()
+    
     if not retriever.is_ready:
         logger.error("[INGEST] Retriever no inicializado — no se pueden indexar chunks")
         return 0
@@ -326,6 +331,7 @@ async def _index_chunks(
             "auto_area":        classification.get("area", "unknown"),
             "auto_confidence":  classification.get("confidence", 0.0),
             "auto_tags":        ",".join(classification.get("tags", [])[:10]),
+            "auto_semantic_terms": ",".join(classification.get("semantic_terms", [])[:20]),
         }
         if chunk.timestamp_start is not None:
             meta_entry["timestamp_start"] = chunk.timestamp_start

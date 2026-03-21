@@ -22,6 +22,11 @@ async def lifespan(app: FastAPI):
     """Inicialización y cierre de recursos pesados."""
     logger.info("=== AI Engine iniciando — Platform: %s ===", settings.PLATFORM)
 
+    # 0) Database connection pool
+    from ai_engine.services.database import init_db_pool, close_db_pool
+    await init_db_pool()
+    logger.info("✓ Database pool initialized")
+
     # 1) Gestor térmico (DEBE ser lo primero)
     from ai_engine.services.thermal_manager import thermal_manager
     await thermal_manager.start()
@@ -55,6 +60,9 @@ async def lifespan(app: FastAPI):
     logger.info("=== AI Engine cerrando ===")
     await thermal_manager.stop()
     await llm_engine.shutdown()
+    from ai_engine.services.database import close_db_pool
+    await close_db_pool()
+    logger.info("✓ Database pool closed")
 
 
 app = FastAPI(
@@ -67,17 +75,24 @@ app = FastAPI(
 # CORS — solo permite el CDN backend local
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.CDN_BACKEND_URL, "http://localhost:3000"],
-    allow_methods=["GET", "POST"],
+    allow_origins=[
+        settings.CDN_BACKEND_URL,
+        "http://localhost:3000",
+        "http://localhost:5174",  # search_ui
+        "http://localhost:5176",  # receiver
+    ],
+    allow_methods=["GET", "POST", "PUT", "DELETE"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 # ---------------------------------------------------------------------------
 # Routers
 # ---------------------------------------------------------------------------
-from ai_engine.routers import search, voice_search, ingest, health  # noqa: E402
+from ai_engine.routers import search, voice_search, ingest, health, auth  # noqa: E402
 
 app.include_router(health.router,       prefix="/api",         tags=["health"])
+app.include_router(auth.router,         tags=["authentication"])
 app.include_router(search.router,       prefix="/api",         tags=["search"])
 app.include_router(voice_search.router, prefix="/api",         tags=["voice"])
 app.include_router(ingest.router,       prefix="/api",         tags=["ingest"])

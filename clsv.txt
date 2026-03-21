@@ -1,0 +1,1 @@
+CLASS:: {'domain': 'AI', 'area': 'computer_vision', 'confidence': 0.973, 'query_normalized': 'vision artificial', 'query_corrected': 'vision artificial', 'query_corrected_used': False, 'query_correction_source': 'none'}

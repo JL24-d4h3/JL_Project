@@ -1,0 +1,7 @@
+        "CROSS_ENCODER":      False,  # reranker lento en CPU
+        "CROSS_ENCODER":      True,
+        "CROSS_ENCODER":      True,
+        "CROSS_ENCODER":      True,
+        "CROSS_ENCODER":      True,
+CROSS_ENCODER_ENABLED  = _cfg["CROSS_ENCODER"]
+CROSS_ENCODER_MODEL    = "cross-encoder/ms-marco-MiniLM-L-6-v2"

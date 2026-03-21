@@ -1,0 +1,72 @@
+                                                Table "public.content"
+      Column      |            Type             | Collation | Nullable |                    Default                    
+------------------+-----------------------------+-----------+----------+-----------------------------------------------
+ id               | uuid                        |           | not null | uuid_generate_v4()
+ title            | character varying(500)      |           | not null | 
+ slug             | character varying(500)      |           |          | 
+ description      | text                        |           |          | 
+ type             | character varying(50)       |           | not null | 
+ category_id      | uuid                        |           |          | 
+ file_path        | character varying(1000)     |           | not null | 
+ file_size        | bigint                      |           | not null | 
+ file_hash        | character varying(64)       |           | not null | 
+ mime_type        | character varying(100)      |           |          | 
+ duration_seconds | integer                     |           |          | 
+ resolution       | character varying(20)       |           |          | 
+ bitrate          | integer                     |           |          | 
+ thumbnail_path   | character varying(1000)     |           |          | 
+ preview_path     | character varying(1000)     |           |          | 
+ quality_versions | jsonb                       |           |          | '{}'::jsonb
+ cache_control    | character varying(200)      |           |          | 'public, max-age=31536000'::character varying
+ etag             | character varying(64)       |           |          | 
+ ttl              | integer                     |           |          | 31536000
+ last_modified    | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ metadata         | jsonb                       |           |          | '{}'::jsonb
+ access_count     | integer                     |           |          | 0
+ download_count   | integer                     |           |          | 0
+ average_rating   | numeric(3,2)                |           |          | 
+ rating_count     | integer                     |           |          | 0
+ status           | character varying(50)       |           |          | 'active'::character varying
+ priority         | integer                     |           |          | 5
+ is_featured      | boolean                     |           |          | false
+ created_by       | uuid                        |           |          | 
+ updated_by       | uuid                        |           |          | 
+ created_at       | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ updated_at       | timestamp without time zone |           |          | CURRENT_TIMESTAMP
+ last_accessed    | timestamp without time zone |           |          | 
+ deleted_at       | timestamp without time zone |           |          | 
+ deleted_by       | uuid                        |           |          | 
+Indexes:
+    "content_pkey" PRIMARY KEY, btree (id)
+    "content_file_hash_key" UNIQUE CONSTRAINT, btree (file_hash)
+    "content_slug_key" UNIQUE CONSTRAINT, btree (slug)
+    "idx_content_category" btree (category_id)
+    "idx_content_created" btree (created_at DESC)
+    "idx_content_etag" btree (etag) WHERE etag IS NOT NULL
+    "idx_content_featured" btree (is_featured) WHERE is_featured = true AND deleted_at IS NULL
+    "idx_content_hash" btree (file_hash)
+    "idx_content_last_accessed" btree (last_accessed) WHERE deleted_at IS NULL
+    "idx_content_priority" btree (priority)
+    "idx_content_search" gin (to_tsvector('spanish'::regconfig, (COALESCE(title, ''::character varying)::text || ' '::text) || COALESCE(description, ''::text)))
+    "idx_content_status" btree (status) WHERE deleted_at IS NULL
+    "idx_content_title_trgm" gin (title gin_trgm_ops)
+    "idx_content_type" btree (type)
+Check constraints:
+    "content_priority_check" CHECK (priority >= 1 AND priority <= 10)
+    "content_status_check" CHECK (status::text = ANY (ARRAY['active'::character varying, 'archived'::character varying, 'processing'::character varying, 'failed'::character varying]::text[]))
+    "content_type_check" CHECK (type::text = ANY (ARRAY['video'::character varying, 'pdf'::character varying, 'audio'::character varying, 'interactive'::character varying, 'image'::character varying, 'document'::character varying]::text[]))
+Foreign-key constraints:
+    "content_category_id_fkey" FOREIGN KEY (category_id) REFERENCES categories(id) ON DELETE SET NULL
+    "content_created_by_fkey" FOREIGN KEY (created_by) REFERENCES users(id) ON DELETE SET NULL
+    "content_deleted_by_fkey" FOREIGN KEY (deleted_by) REFERENCES users(id) ON DELETE SET NULL
+    "content_updated_by_fkey" FOREIGN KEY (updated_by) REFERENCES users(id) ON DELETE SET NULL
+Referenced by:
+    TABLE "access_log" CONSTRAINT "access_log_content_id_fkey" FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE
+    TABLE "content_availability" CONSTRAINT "content_availability_content_id_fkey" FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE
+    TABLE "content_tags" CONSTRAINT "content_tags_content_id_fkey" FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE
+    TABLE "permissions" CONSTRAINT "permissions_content_id_fkey" FOREIGN KEY (content_id) REFERENCES content(id) ON DELETE CASCADE
+    TABLE "storage_stats" CONSTRAINT "storage_stats_largest_file_id_fkey" FOREIGN KEY (largest_file_id) REFERENCES content(id)
+Triggers:
+    trg_content_etag BEFORE INSERT OR UPDATE ON content FOR EACH ROW EXECUTE FUNCTION generate_etag()
+    trg_content_updated_at BEFORE UPDATE ON content FOR EACH ROW EXECUTE FUNCTION update_updated_at_column()
+

@@ -1,0 +1,2 @@
+Lista de colegios sin conexión a internet SCORE: 1.0
+Clases de SDN SCORE: 0.8628

@@ -1,0 +1,77 @@
+[
+  {
+    "score": 1.0,
+    "title": "Sílabo de GTICS",
+    "text": "nera personal por el profesor.\nVIII. EVALUACIÓN\nSistema de evaluación\nN° Codigo\nTipo de\nEvaluación\nC"
+  },
+  {
+    "score": 0.13465972455422914,
+    "title": "Algoritmo de Dijkstra",
+    "text": "let effective_cost = connection.cost as f64 * (1.0 + alpha * utilization_factor);\n                pr"
+  },
+  {
+    "score": 0.12515117274334986,
+    "title": "Sílabo de GTICS",
+    "text": "Finalmente desarrolla la formulación, evaluación y gestión de proyectos en contextos de software."
+  },
+  {
+    "score": 0.12351237136362725,
+    "title": "YOLO",
+    "text": "YOLO\n\nYOLO\n\n# -*- coding: utf-8 -*-\n\"\"\"\n@author: josue\n\"\"\"\n\nimport cv2 \nimport matplotlib.pyplot as "
+  },
+  {
+    "score": 0.11550132714098293,
+    "title": "U-net",
+    "text": "U-net\n\nU-net\n\n#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\n\n@author: josuetorres\n\"\"\"\n\nimport o"
+  },
+  {
+    "score": 0.08993584688227763,
+    "title": "Algoritmo de Dijkstra",
+    "text": "Algoritmo de Dijkstra\n\nAlgoritmo de ejemplo a modo de prueba\n\nuse std::sync::atomic::{AtomicU32, Ord"
+  },
+  {
+    "score": 0.08428934535510035,
+    "title": "Simulador de tráfico",
+    "text": "Simulador de tráfico\n\nCódigo simplificado de un simulador de tráfico\n\npub struct Packet {\n    pub id"
+  },
+  {
+    "score": 0.07475381335028886,
+    "title": "SIMULADOR DE PETICIONES",
+    "text": "SIMULADOR DE PETICIONES\n\nSIMULADOR DE PETICIONES\n\nimport paho.mqtt.client as mqtt\nimport os\n\ndef on_"
+  },
+  {
+    "score": 0.0,
+    "title": "DATA AUGMENTATION",
+    "text": "DATA AUGMENTATION\n\nDATA AUGMENTATION\n\n#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n\"\"\"\n\n@author: j"
+  },
+  {
+    "score": 0.0,
+    "title": "META",
+    "text": "META. META"
+  },
+  {
+    "score": 0.0,
+    "title": "Colegios sin conexión a internet",
+    "text": "Colegios sin conexión a internet. Esta es una lista de colegios sin conexión a internet en el Perú"
+  },
+  {
+    "score": 0.0867671276477121,
+    "title": "Sílabo de GTICS",
+    "text": "BIBLIOGRAFÍA\nReferencia obligatoria\n-\nLibro\nBibeault, Bear.\n2010\njQuery in action\nGreenwich, CT : Ma"
+  },
+  {
+    "score": 0.08397370949034233,
+    "title": "Sílabo de GTICS",
+    "text": "Recursos web: js y css, formularios, data-binding, conexión a base de datos, JPA\nAtributos entre cap"
+  },
+  {
+    "score": 0.07239267207146427,
+    "title": "Sílabo de GTICS",
+    "text": "Data Transfer Object (DTO)\nRe-uso de código HTML\nPersistencia de datos en formularios\nValidación ava"
+  },
+  {
+    "score": 0.002792099385048985,
+    "title": "Sílabo de GTICS",
+    "text": "Sílabo de GTICS\n\nEste es un sílabo de un curso de pregrado en la facultad de Telecomunicaciones\n\nFAC"
+  }
+]

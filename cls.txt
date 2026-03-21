@@ -1,0 +1,1 @@
+CLASS:: {'domain': 'NET', 'area': 'distributed', 'confidence': 0.97, 'query_normalized': 'sdn', 'query_corrected': 'sdn', 'query_corrected_used': False, 'query_correction_source': 'none'}

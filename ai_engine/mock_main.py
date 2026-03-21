@@ -1090,7 +1090,16 @@ async def _search_cdn(query: str) -> list[dict]:
         seen: dict[str, dict] = {}
         for chunk in chunks:
             cid = chunk.get("content_id", "")
-            score = chunk.get("score", 0)
+            score = float(chunk.get("score", 0.0))
+            
+            # Filtro estricto para evitar alucinaciones (textos random que ChromaDB devuelve por acercamiento)
+            # Para Cross-encoders activos, usamos 0.40, para Chroma puro 0.855
+            from ai_engine.config import settings
+            min_score = 0.855 if not settings.CROSS_ENCODER_ENABLED else 0.40
+            
+            if score < min_score:
+                continue
+                
             if cid not in seen or score > seen[cid].get("relevance_score", 0):
                 ctype = chunk.get("content_type", "document")
                 ts = chunk.get("timestamp_start")

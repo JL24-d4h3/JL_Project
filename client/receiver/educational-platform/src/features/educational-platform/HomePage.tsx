@@ -1,11 +1,12 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Search, BookOpen, Loader2, TrendingUp, Users, Award } from 'lucide-react'
+import { Search, Loader2, TrendingUp, Users, Award } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Card, CardContent } from '@/components/ui/card'
 import { getCategories, getCourses } from '@/lib/api'
 import { useAuth } from '@/context/AuthContext'
+import { Navbar } from '@/components/Navbar'
 import type { Category, Course } from '@/lib/api'
 
 export function HomePage() {
@@ -61,13 +62,13 @@ export function HomePage() {
 
   const getCategoryColor = (category: string): string => {
     const colors: Record<string, string> = {
-      'Tecnología e Informática': 'bg-blue-600',
-      'Ciencias Naturales': 'bg-green-600',
-      'Matemáticas y Ciencias Exactas': 'bg-purple-600',
-      'Humanidades y Ciencias Sociales': 'bg-amber-600',
-      'Arte y Cultura': 'bg-pink-600',
-      'Idiomas y Comunicación': 'bg-indigo-600',
-      'Educación Física y Salud': 'bg-red-600',
+      'Tecnología e Informática': 'bg-slate-800',
+      'Ciencias Naturales': 'bg-slate-700',
+      'Matemáticas y Ciencias Exactas': 'bg-slate-800',
+      'Humanidades y Ciencias Sociales': 'bg-slate-700',
+      'Arte y Cultura': 'bg-slate-800',
+      'Idiomas y Comunicación': 'bg-slate-700',
+      'Educación Física y Salud': 'bg-slate-800',
     }
     return colors[category] || 'bg-slate-600'
   }
@@ -76,31 +77,7 @@ export function HomePage() {
 
   return (
     <div className="min-h-screen bg-white">
-      {/* Header */}
-      <header className="border-b border-slate-200 bg-white sticky top-0 z-50">
-        <div className="container mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-lg bg-slate-900 flex items-center justify-center">
-              <BookOpen className="h-6 w-6 text-white" />
-            </div>
-            <span className="font-bold text-lg text-slate-900">CDN Educativa</span>
-          </div>
-          <nav className="hidden md:flex gap-8">
-            <a href="#" className="text-slate-600 hover:text-slate-900 font-medium">Inicio</a>
-            <a href="#" className="text-slate-600 hover:text-slate-900 font-medium">Biblioteca</a>
-            <a href="#" className="text-slate-600 hover:text-slate-900 font-medium">Proyectos</a>
-          </nav>
-          {!isAuthenticated && (
-            <Button
-              onClick={() => navigate('/auth')}
-              className="bg-slate-900 hover:bg-slate-800 text-white"
-              size="sm"
-            >
-              Acceder
-            </Button>
-          )}
-        </div>
-      </header>
+      <Navbar />
 
       {/* Hero */}
       <section className="bg-linear-gradient from-slate-50 via-slate-50 to-white px-6 py-20">

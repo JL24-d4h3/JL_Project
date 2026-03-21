@@ -1,0 +1,52 @@
+[0.156] Sílabo de GTICS: Finalmente desarrolla la formulación, evaluación y gestión d
+[0.145] Algoritmo de Dijkstra: let effective_cost = connection.cost as f64 * (1.0 + alpha *
+[0.115] U-net: U-net
+
+U-net
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+[0.115] U-net: U-net
+
+U-net
+
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+[0.114] YOLO: YOLO
+
+YOLO
+
+# -*- coding: utf-8 -*-
+"""
+@author: josue
+"""
+
+
+[0.114] YOLO: YOLO
+
+YOLO
+
+# -*- coding: utf-8 -*-
+"""
+@author: josue
+"""
+
+
+[0.103] SIMULADOR DE PETICIONES: SIMULADOR DE PETICIONES
+
+SIMULADOR DE PETICIONES
+
+import pah
+[0.103] SIMULADOR DE PETICIONES: SIMULADOR DE PETICIONES
+
+SIMULADOR DE PETICIONES
+
+import pah
+[0.103] SIMULADOR DE PETICIONES: SIMULADOR DE PETICIONES
+
+SIMULADOR DE PETICIONES
+
+import pah
+[0.091] Sílabo de GTICS: Data Transfer Object (DTO)
+Re-uso de código HTML
+Persistenci
