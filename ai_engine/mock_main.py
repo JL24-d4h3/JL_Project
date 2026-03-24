@@ -305,17 +305,28 @@ _DOMAIN_SETS: list[set] = [
 ]
 
 
+def _strip_accents(text: str) -> str:
+    """Elimina acentos/diacríticos de texto para comparación normalizada."""
+    import unicodedata
+    normalized = unicodedata.normalize("NFD", text)
+    return "".join(ch for ch in normalized if unicodedata.category(ch) != "Mn")
+
+
 def _classify_query_by_keywords(query: str, keyword_signals: dict) -> tuple[str | None, str | None]:
     """
     Clasificación simple de query por keywords (fallback cuando sklearn no está disponible).
+    Normaliza acentos para que "vision" matchee "visión".
     Retorna (domain, area) o (None, None) si no hay match claro.
     """
-    query_lower = query.lower()
+    # Normalizar query: minúsculas + sin acentos
+    query_norm = _strip_accents(query.lower())
     from collections import Counter
     scores: Counter = Counter()
 
     for keyword, (domain, area, weight) in keyword_signals.items():
-        if keyword in query_lower:
+        # Normalizar keyword también
+        keyword_norm = _strip_accents(keyword.lower())
+        if keyword_norm in query_norm:
             scores[(domain, area)] += weight
 
     if not scores:
@@ -371,50 +382,34 @@ async def _search_cdn(query: str) -> list[dict]:
             text = chunk.get("text", "").lower()
             full_text = f"{title} {text}"
 
-            # FILTRO 1: Threshold mínimo para garantizar relevancia semántica
+            # FILTRO 1: Threshold mínimo (ChromaDB ya hizo el trabajo semántico)
             min_score = 0.15
             if score < min_score:
                 continue
 
-            # FILTRO 2: Verificación de relevancia (token overlap O domain match)
-            is_relevant = False
+            # La mayoría de chunks que pasan 0.15 son relevantes
+            # Domain matching es para BOOST, no para rechazo
+            full_text_norm = _strip_accents(full_text)
 
-            # Check A: Match directo de la query completa
-            if query_norm in title or query_norm in text:
-                is_relevant = True
-            else:
-                # Check B: Token overlap para acrónimos técnicos
-                content_tokens = set(title.split() + text.split())
-                tech_acronyms = {
-                    "sdn", "api", "tcp", "udp", "http", "sql", "gpu", "cpu", "ram",
-                    "ai", "ml", "nlp", "iot", "cdn", "vcs", "gps", "usb", "url", "uri",
-                    "css", "html", "xml", "json", "yaml", "ssh", "ftp", "dns", "dhcp",
-                    "yolo", "unet", "cnn", "vgg", "bert", "gpt", "lstm",
-                }
-                meaningful_tokens = {t for t in query_tokens if t in tech_acronyms or len(t) >= 4}
-                if meaningful_tokens and meaningful_tokens.intersection(content_tokens):
-                    is_relevant = True
+            # Detectar dominio del chunk (para boosting)
+            chunk_domain = None
+            for keyword, (domain, area, weight) in KEYWORD_SIGNALS.items():
+                keyword_norm = _strip_accents(keyword.lower())
+                if keyword_norm in full_text_norm and weight >= 2.0:
+                    chunk_domain = domain
+                    break
 
-                # Check C: Domain matching semántico (la clave para "visión artificial" → YOLO)
-                # Si la query tiene un dominio específico, verificar si el chunk pertenece al mismo
-                if not is_relevant and query_domain:
-                    # Buscar keywords del mismo dominio en el contenido del chunk
-                    for keyword, (domain, area, _weight) in KEYWORD_SIGNALS.items():
-                        if keyword in full_text:
-                            # Si el chunk tiene una keyword del mismo dominio que la query
-                            if domain == query_domain:
-                                # Bonus si además es la misma área (computer_vision, etc.)
-                                if query_area and area == query_area:
-                                    is_relevant = True
-                                    score *= 1.1  # Boost por match de área
-                                    break
-                                # Match solo de dominio (menos seguro pero válido)
-                                elif score >= 0.20:  # Requiere score más alto para domain-only
-                                    is_relevant = True
-                                    break
+            # BOOST: Si la query tiene dominio específico y el chunk pertenece al mismo dominio
+            if query_domain and chunk_domain == query_domain:
+                score *= 1.25  # Boost significativo para domain match
 
-            if not is_relevant:
-                continue
+                # Extra boost si además es la misma área (computer_vision)
+                if query_area:
+                    for keyword, (domain, area, _w) in KEYWORD_SIGNALS.items():
+                        kw_norm = _strip_accents(keyword.lower())
+                        if kw_norm in full_text_norm and domain == query_domain and area == query_area:
+                            score *= 1.15
+                            break
 
             if cid not in seen or score > seen[cid].get("relevance_score", 0):
                 ctype = chunk.get("content_type", "document")
