@@ -45,7 +45,7 @@ async def _init_retriever():
         count = await retriever.chunk_count()
         logger.info("✓ Retriever listo — %d chunks indexados en ChromaDB", count)
     except Exception as exc:
-        logger.warning("Retriever no disponible, usando solo MOCK_DB: %s", exc)
+        logger.warning("Retriever no disponible, búsqueda ChromaDB deshabilitada: %s", exc)
 
 
 @asynccontextmanager
@@ -82,42 +82,8 @@ class SearchRequest(BaseModel):
 
 
 
-def _match(query: str) -> dict:
-    q_lower = query.lower()
-
-    # 1. Buscar en CDN (L1)
-    best_cdn: dict | None = None
-    best_hits = 0
-    for entry in MOCK_DB:
-        hits = sum(1 for kw in entry["keywords"] if kw in q_lower)
-        if hits > best_hits:
-            best_hits = hits
-            best_cdn = entry
-    if best_cdn and best_hits > 0:
-        return best_cdn
-
-    # 2. Buscar en conocimiento general (L3 pre-escrito)
-    for entry in GENERAL_KNOWLEDGE:
-        for kw in entry["keywords"]:
-            if kw in q_lower:
-                return {"results": [], "level": "L3", "ai_text": entry["ai_text"], "suggestions": entry["suggestions"]}
-
-    # 3. Fallback dinámico (plantilla o LLM)
-    return _dynamic_response(query)
-
-
-def _is_dynamic_query(query: str) -> bool:
-    """Retorna True si la query no tiene match en MOCK_DB ni GENERAL_KNOWLEDGE.
-    En ese caso el stream debe usar el LLM real si está disponible."""
-    q_lower = query.lower()
-    for entry in MOCK_DB:
-        if sum(1 for kw in entry["keywords"] if kw in q_lower) > 0:
-            return False
-    for entry in GENERAL_KNOWLEDGE:
-        for kw in entry["keywords"]:
-            if kw in q_lower:
-                return False
-    return True
+# Funciones obsoletas eliminadas (_match, _is_dynamic_query) - ya no se usan desde
+# que se eliminaron MOCK_DB y GENERAL_KNOWLEDGE en favor de búsqueda dinámica en ChromaDB
 
 
 def _build_llm_prompt(query: str) -> str:
@@ -339,11 +305,36 @@ _DOMAIN_SETS: list[set] = [
 ]
 
 
+def _classify_query_by_keywords(query: str, keyword_signals: dict) -> tuple[str | None, str | None]:
+    """
+    Clasificación simple de query por keywords (fallback cuando sklearn no está disponible).
+    Retorna (domain, area) o (None, None) si no hay match claro.
+    """
+    query_lower = query.lower()
+    from collections import Counter
+    scores: Counter = Counter()
+
+    for keyword, (domain, area, weight) in keyword_signals.items():
+        if keyword in query_lower:
+            scores[(domain, area)] += weight
+
+    if not scores:
+        return None, None
+
+    best = scores.most_common(1)[0]
+    (domain, area), weight = best
+    # Solo retornar si tiene un match claro (peso >= 2.0)
+    if weight >= 2.0:
+        return domain, area
+    return None, None
+
+
 async def _search_cdn(query: str) -> list[dict]:
     """Busca contenido real indexado en ChromaDB. Retorna [] si no hay resultados."""
     try:
         # Acceder directamente al singleton retriever (más robusto que usar _retriever global)
         from ai_engine.services.hybrid_retriever import retriever
+        from ai_engine.services.classifier import classify_query, KEYWORD_SIGNALS
 
         # Lazy initialization: si no está listo, inicializarlo ahora
         if not retriever.is_ready:
@@ -356,19 +347,75 @@ async def _search_cdn(query: str) -> list[dict]:
             logger.debug("ChromaDB: 0 resultados para '%s'", query[:50])
             return []
 
+        # Clasificar la query por dominio
+        # Primero intentar clasificador semántico, si falla usar keywords
+        query_classification = classify_query(query)
+        query_domain = query_classification.get("domain")
+        query_area = query_classification.get("area")
+
+        # Fallback a keywords si el clasificador semántico no funcionó
+        if not query_domain:
+            query_domain, query_area = _classify_query_by_keywords(query, KEYWORD_SIGNALS)
+
+        logger.debug("Query '%s' clasificado como: %s/%s", query[:30], query_domain, query_area)
+
         # Convertir chunks del retriever al formato de tarjetas CDN
         seen: dict[str, dict] = {}
+        query_norm = query.lower().strip()
+        query_tokens = set(query_norm.split())
+
         for chunk in chunks:
             cid = chunk.get("content_id", "")
             score = float(chunk.get("score", 0.0))
-            
-            # Threshold muy bajo - los scores de embeddings típicamente van de 0.05-0.3
-            # El retriever ya ordenó por relevancia, no necesitamos filtrar agresivamente
-            min_score = 0.01
-            
+            title = chunk.get("title", "").lower()
+            text = chunk.get("text", "").lower()
+            full_text = f"{title} {text}"
+
+            # FILTRO 1: Threshold mínimo para garantizar relevancia semántica
+            min_score = 0.15
             if score < min_score:
                 continue
-                
+
+            # FILTRO 2: Verificación de relevancia (token overlap O domain match)
+            is_relevant = False
+
+            # Check A: Match directo de la query completa
+            if query_norm in title or query_norm in text:
+                is_relevant = True
+            else:
+                # Check B: Token overlap para acrónimos técnicos
+                content_tokens = set(title.split() + text.split())
+                tech_acronyms = {
+                    "sdn", "api", "tcp", "udp", "http", "sql", "gpu", "cpu", "ram",
+                    "ai", "ml", "nlp", "iot", "cdn", "vcs", "gps", "usb", "url", "uri",
+                    "css", "html", "xml", "json", "yaml", "ssh", "ftp", "dns", "dhcp",
+                    "yolo", "unet", "cnn", "vgg", "bert", "gpt", "lstm",
+                }
+                meaningful_tokens = {t for t in query_tokens if t in tech_acronyms or len(t) >= 4}
+                if meaningful_tokens and meaningful_tokens.intersection(content_tokens):
+                    is_relevant = True
+
+                # Check C: Domain matching semántico (la clave para "visión artificial" → YOLO)
+                # Si la query tiene un dominio específico, verificar si el chunk pertenece al mismo
+                if not is_relevant and query_domain:
+                    # Buscar keywords del mismo dominio en el contenido del chunk
+                    for keyword, (domain, area, _weight) in KEYWORD_SIGNALS.items():
+                        if keyword in full_text:
+                            # Si el chunk tiene una keyword del mismo dominio que la query
+                            if domain == query_domain:
+                                # Bonus si además es la misma área (computer_vision, etc.)
+                                if query_area and area == query_area:
+                                    is_relevant = True
+                                    score *= 1.1  # Boost por match de área
+                                    break
+                                # Match solo de dominio (menos seguro pero válido)
+                                elif score >= 0.20:  # Requiere score más alto para domain-only
+                                    is_relevant = True
+                                    break
+
+            if not is_relevant:
+                continue
+
             if cid not in seen or score > seen[cid].get("relevance_score", 0):
                 ctype = chunk.get("content_type", "document")
                 ts = chunk.get("timestamp_start")
@@ -385,10 +432,11 @@ async def _search_cdn(query: str) -> list[dict]:
                 }
         cards = sorted(seen.values(), key=lambda c: c["relevance_score"], reverse=True)
 
-        # Tomar los top 5 resultados sin filtrar agresivamente
+        # Tomar los top 5 resultados
         cards = cards[:5]
 
-        logger.info("ChromaDB search: %d chunks → %d cards para '%s'", len(chunks), len(cards), query[:50])
+        logger.info("ChromaDB search: %d chunks → %d cards para '%s' (query_domain=%s)",
+                    len(chunks), len(cards), query[:50], query_domain)
         return cards
     except Exception as exc:
         logger.warning("ChromaDB search falló: %s", exc)
@@ -655,10 +703,11 @@ async def search_stream(req: SearchRequest):
 
 @app.post("/api/voice-search")
 async def voice_search():
+    """Endpoint placeholder para búsqueda por voz (no implementado)."""
     return {
         "query_transcribed": "¿Qué es la Transformada de Fourier?",
-        "cdn_results": MOCK_DB[0]["results"],
-        "ai_overview": {"text": MOCK_DB[0]["ai_text"], "level": "L1"},
+        "cdn_results": [],
+        "ai_overview": {"text": "Búsqueda por voz no implementada aún.", "level": "L0"},
     }
 
 
