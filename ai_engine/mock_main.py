@@ -370,12 +370,33 @@ async def _search_cdn(query: str) -> list[dict]:
 
         logger.debug("Query '%s' clasificado como: %s/%s", query[:30], query_domain, query_area)
 
+        # FALLBACK: Si query tiene dominio técnico claro, buscar también por keywords técnicas
+        # Esto ayuda cuando los embeddings no encuentran similitud (ej: español ↔ código en inglés)
+        fallback_keywords = None
+        if query_domain == "AI" and query_area == "computer_vision":
+            # Para visión artificial: buscar por keywords técnicas
+            fallback_keywords = "yolo object detection segmentation unet resnet cnn convolutional"
+        elif query_domain == "NET" and query_area == "networking":
+            fallback_keywords = "tcp socket networking protocols sdn routing switch"
+        elif query_domain == "CS" and query_area == "algorithms":
+            fallback_keywords = "dijkstra algorithm graph path shortest"
+
+        fallback_chunks = []
+        if fallback_keywords:
+            fallback_chunks = await retriever.search(fallback_keywords, top_k=5)
+            logger.debug("Fallback search con keywords técnicas: %d chunks", len(fallback_chunks))
+
         # Convertir chunks del retriever al formato de tarjetas CDN
+        # Combinar chunks originales + fallback chunks
+        all_chunks = chunks + fallback_chunks
+        if not all_chunks:
+            all_chunks = chunks
+
         seen: dict[str, dict] = {}
         query_norm = query.lower().strip()
         query_tokens = set(query_norm.split())
 
-        for chunk in chunks:
+        for chunk in all_chunks:
             cid = chunk.get("content_id", "")
             score = float(chunk.get("score", 0.0))
             title = chunk.get("title", "").lower()
@@ -383,7 +404,9 @@ async def _search_cdn(query: str) -> list[dict]:
             full_text = f"{title} {text}"
 
             # FILTRO 1: Threshold mínimo (ChromaDB ya hizo el trabajo semántico)
-            min_score = 0.15
+            # Lowered to 0.10 porque los embeddings multilingual tienen limitaciones
+            # para matching entre frases en español (visión artificial) y código en inglés (YOLO)
+            min_score = 0.10
             if score < min_score:
                 continue
 
@@ -430,8 +453,8 @@ async def _search_cdn(query: str) -> list[dict]:
         # Tomar los top 5 resultados
         cards = cards[:5]
 
-        logger.info("ChromaDB search: %d chunks → %d cards para '%s' (query_domain=%s)",
-                    len(chunks), len(cards), query[:50], query_domain)
+        logger.info("ChromaDB search: %d chunks + %d fallback → %d cards para '%s' (domain=%s/%s)",
+                    len(chunks), len(fallback_chunks), len(cards), query[:50], query_domain, query_area or "?")
         return cards
     except Exception as exc:
         logger.warning("ChromaDB search falló: %s", exc)
